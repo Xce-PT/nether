@@ -1,0 +1,8 @@
+[build]
+target = "aarch64-rpi4-none.json"
+
+[net]
+git-fetch-with-cli = true
+
+[unstable]
+build-std = ["core", "compiler_builtins"]

@@ -1,0 +1,7 @@
+disable_overscan=1
+arm_boost=1
+disable_commandline_tags=1
+arm_64bit=1
+enable_gic=1
+core_freq_min=250
+gpu_mem=16
