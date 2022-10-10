@@ -11,7 +11,7 @@
 use core::arch::asm;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::mbox::{Message, MBOX};
+use crate::mbox::{Mailbox, Message, MBOX};
 use crate::pgalloc::ALLOC as PGALLOC;
 use crate::sync::{Lazy, Lock};
 use crate::touch::Info as TouchInfo;
@@ -107,7 +107,7 @@ impl Video
             match tag.id() {
                 ALLOC_TAG => {
                     let alloc = unsafe { tag.interpret_as::<Alloc>().unwrap() };
-                    base = (alloc.base & !0xC0000000) as _;
+                    base = Mailbox::map_from_vc(alloc.base);
                     size = alloc.size as _;
                 }
                 PHYS_DIM_TAG => {

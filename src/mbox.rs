@@ -21,18 +21,20 @@ use core::slice::from_raw_parts as slice_from_raw_parts;
 use core::sync::atomic::{fence, Ordering};
 
 #[cfg(test)]
-use tests::*;
-
+use self::tests::*;
 #[cfg(not(test))]
 use crate::pgalloc::{Alloc as PageAlloc, AllocError as PageAllocError};
 #[cfg(not(test))]
 use crate::sync::LockAdvisor;
 #[cfg(not(test))]
-use crate::PAGE_GRANULE;
+use crate::{PAGE_GRANULE, RAM_BASE};
 
+/// Offset of the physical RAM from the perspective of the video core.
+#[cfg(not(test))]
+const VC_OFFSET: usize = 0xC0000000;
 /// Base address of the video core mailbox registers.
 #[cfg(not(test))]
-const BASE: usize = 0xFE00B880;
+const BASE: usize = 0xFE00B880 + RAM_BASE;
 /// Pointer to the inbox data register.
 #[cfg(not(test))]
 const INBOX_DATA: *const u32 = BASE as _;
@@ -176,6 +178,34 @@ impl Mailbox
             return Err(MailboxExchangeError { code });
         }
         Ok(msg)
+    }
+
+    /// Maps from a RAM address from the perspective of the ARM core to an
+    /// address from the perspective of the video core suitable to be sent as
+    /// data through the mailbox.
+    ///
+    /// * `buf`: The buffer whose address is to be converted.
+    ///
+    /// Returns the converted buffer address in a format suitable to be sent to
+    /// the video core.
+    ///
+    /// Panics if `buf` is not within the first GB of physical RAM.
+    ///
+    /// The caller is responsible for ensuring that the buffer has been
+    /// allocated specifically for this purpose.
+    pub unsafe fn map_to_vc<T>(buf: *mut T) -> u32
+    {
+        let real = buf as usize & !RAM_BASE;
+        assert!(real < 0x40000000, "Buffer is not reachable by the video core");
+        (real | VC_OFFSET) as _
+    }
+
+    /// Maps data received from the mailbox from a RAM address from the
+    /// perspective of the video core to an address from the perspective of the
+    /// ARM core.
+    pub fn map_from_vc<T>(data: u32) -> *mut T
+    {
+        (data as usize & !VC_OFFSET | RAM_BASE) as _
     }
 }
 

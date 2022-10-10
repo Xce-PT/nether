@@ -2,12 +2,12 @@
 //!
 //! There is no official documentation for this driver, so its implementation is my interpretation of the implementation in the [Linux kernel source](https://github.com/raspberrypi/linux/blob/rpi-5.15.y/drivers/input/touchscreen/raspberrypi-ts.c).
 
+use core::mem::size_of;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::mbox::{Message, MBOX};
+use crate::mbox::{Mailbox, Message, MBOX};
 use crate::pgalloc::ALLOC as PGALLOC;
 use crate::sync::{Lazy, Lock};
-use crate::PAGE_GRANULE;
 
 /// Tag to tell the video core about the location of the touchscreen buffer.
 const TOUCHBUF_TAG: u32 = 0x4801F;
@@ -84,10 +84,10 @@ impl Touch
     /// Returns the initialized touchscreen driver.
     fn new() -> Lock<Self>
     {
-        let buf = unsafe { PGALLOC.alloc(PAGE_GRANULE).unwrap().cast::<Registers>() };
+        let buf = unsafe { PGALLOC.alloc(size_of::<Registers>()).unwrap().cast::<Registers>() };
         unsafe { (*buf).points_len = INVALID_POINTS };
         let mut msg = Message::new_in(&PGALLOC).unwrap();
-        let data = buf as usize as u32 | 0xC0000000; // Add the video core's internal memory offset.
+        let data = unsafe { Mailbox::map_to_vc(buf) };
         msg.add_tag(TOUCHBUF_TAG, data).unwrap();
         MBOX.exchange(msg).unwrap();
         let this = Self { buf,

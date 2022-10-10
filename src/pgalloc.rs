@@ -11,11 +11,10 @@ use core::ptr::null_mut;
 use core::write;
 
 #[cfg(test)]
-use tests::*;
-
+use self::tests::*;
 use crate::sync::Lock;
 #[cfg(not(test))]
-use crate::{PAGE_GRANULE, TOTAL_RAM};
+use crate::{PAGE_GRANULE, RAM_BASE, TOTAL_RAM};
 
 /// Global page allocator instance.
 #[cfg(not(test))]
@@ -120,8 +119,9 @@ impl Alloc
     /// The caller is responsible for ensuring that the specified base and size
     /// are the same values that were returned by and provided to
     /// [`Self::alloc`] respectively.
-    pub unsafe fn dealloc(&self, block: *mut u8, mut size: usize)
+    pub unsafe fn dealloc(&self, block: *mut u8, size: usize)
     {
+        let mut size = max(size.next_power_of_two(), PAGE_GRANULE);
         let mut block_lists = self.block_lists.lock();
         let mut block = block.cast::<FreeBlock>();
         let mut idx = usize::trailing_zeros(size / PAGE_GRANULE) as usize;
@@ -198,7 +198,7 @@ impl Alloc
                 let size = min(usize::next_power_of_two(region.end - cur + 1) >> 1,
                                1 << cur.trailing_zeros() as usize);
                 let idx = usize::trailing_zeros(size / PAGE_GRANULE) as usize;
-                let block = cur as *mut FreeBlock;
+                let block = (cur + RAM_BASE) as *mut FreeBlock;
                 *block = FreeBlock { next: null_mut(),
                                      prev: block_tails[idx] };
                 if !(*block).prev.is_null() {
@@ -228,6 +228,7 @@ mod tests
     use super::*;
 
     pub const TOTAL_RAM: usize = 0x1000;
+    pub const RAM_BASE: usize = 0x0;
     pub const PAGE_GRANULE: usize = 0x100;
 
     #[derive(Debug)]
