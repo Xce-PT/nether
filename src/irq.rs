@@ -11,13 +11,14 @@ use core::ops::{Index, IndexMut};
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::sync::{Lazy, Lock};
+use crate::RAM_BASE;
 
 /// Number of SPIs on the BCM2711.
 const SPI_COUNT: usize = 192;
 /// Total number of IRQs on the BCM2711.
 const IRQ_COUNT: usize = SPI_COUNT + 32;
 /// Base address of theGIC 400.
-const GIC_BASE: usize = 0xFF840000;
+const GIC_BASE: usize = 0xFF840000 + RAM_BASE;
 /// IRQ set enable registers.
 const GICD_ISENABLER: *mut [u32; IRQ_COUNT >> 5] = (GIC_BASE + 0x1100) as _;
 /// IRQ clear enable registers.

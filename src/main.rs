@@ -40,21 +40,9 @@ use self::uart::UART;
 #[cfg(not(test))]
 use self::video::VIDEO;
 
-/// Pixel valve 1 IRQ.
+/// Physical RAM base address.
 #[cfg(not(test))]
-const PV_IRQ: usize = 142;
-/// Pixel valve 1 base address.
-#[cfg(not(test))]
-const PV_BASE: usize = 0xFE207000;
-/// Pixel valve 1 interrupt enabler register.
-#[cfg(not(test))]
-const PV_INT: *mut u32 = (PV_BASE + 0x24) as _;
-/// Pixel valve 1 interrupt status and acknowledgement register.
-#[cfg(not(test))]
-const PV_STATUS: *mut u32 = (PV_BASE + 0x28) as _;
-/// VSync interrupt.
-#[cfg(not(test))]
-const VSYNC_PV_INT: u32 = 0x10;
+const RAM_BASE: usize = 0xFFFFFFF800000000;
 /// Total amount of physical RAM.
 #[cfg(not(test))]
 const TOTAL_RAM: usize = 1 << 30;
@@ -67,6 +55,21 @@ const FREE_RAM: [Range<usize>; 4] = [0x0 .. 0x1160000,
 /// Smallest size of a memory page.
 #[cfg(not(test))]
 const PAGE_GRANULE: usize = 0x1000;
+/// Pixel valve 1 IRQ.
+#[cfg(not(test))]
+const PV_IRQ: usize = 142;
+/// Pixel valve 1 base address.
+#[cfg(not(test))]
+const PV_BASE: usize = 0xFE207000 | RAM_BASE;
+/// Pixel valve 1 interrupt enabler register.
+#[cfg(not(test))]
+const PV_INT: *mut u32 = (PV_BASE + 0x24) as _;
+/// Pixel valve 1 interrupt status and acknowledgement register.
+#[cfg(not(test))]
+const PV_STATUS: *mut u32 = (PV_BASE + 0x28) as _;
+/// VSync interrupt.
+#[cfg(not(test))]
+const VSYNC_PV_INT: u32 = 0x10;
 
 #[cfg(not(test))]
 global_asm!(include_str!("boot.s"));
@@ -96,7 +99,7 @@ pub extern "C" fn main() -> !
 /// Panics with diagnostic information about a fault.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn fault() -> !
+pub extern "C" fn fault(kind: usize) -> !
 {
     let level: usize;
     let syndrome: usize;
@@ -118,7 +121,21 @@ pub extern "C" fn fault() -> !
         },
         _ => panic!("Unknown exception caught at level {level}"),
     }
-    panic!("Fault at level {level}: Syndrome: 0x{syndrome:x}, Address: 0x{addr:x}, Location: 0x{ret:x}, State: 0x{state:x}");
+    panic!("Fault at level {level}: Kind: 0x{kind:x}, Syndrome: 0x{syndrome:x}, Address: 0x{addr:x}, Location: 0x{ret:x}, State: 0x{state:x}");
+}
+
+/// Halts the system.
+#[cfg(not(test))]
+#[no_mangle]
+pub extern "C" fn halt() -> !
+{
+    unsafe {
+        asm!("msr daifset, #0x3",
+             "0:",
+             "wfe",
+             "b 0b",
+             options(nomem, nostack, preserves_flags, noreturn))
+    }
 }
 
 /// Dummy function just to run tests.
@@ -171,17 +188,4 @@ fn sleep()
              "msr daifset, #0x3",
              options(nomem, nostack, preserves_flags))
     };
-}
-
-/// Halts the system.
-#[cfg(not(test))]
-fn halt() -> !
-{
-    unsafe {
-        asm!("msr daifset, #0x3",
-             "0:",
-             "wfe",
-             "b 0b",
-             options(nomem, nostack, preserves_flags, noreturn))
-    }
 }

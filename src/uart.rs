@@ -10,9 +10,10 @@ use core::hint::spin_loop;
 use core::marker::PhantomData;
 
 use crate::sync::{Lazy, Lock};
+use crate::RAM_BASE;
 
 /// Base of the auxiliary peripheral configuration registers
-const AUX_BASE: usize = 0xFE215000;
+const AUX_BASE: usize = 0xFE215000 + RAM_BASE;
 /// Auxiliary peripheral enabler register.
 const AUX_ENABLES: *mut u32 = (AUX_BASE + 0x4) as _;
 /// Input / output Mini UART register.
@@ -26,7 +27,7 @@ const AUX_MU_STAT: *const u32 = (AUX_BASE + 0x64) as _;
 /// Mini UART BAUD rate divisor.
 const AUX_MU_BAUD: *mut u32 = (AUX_BASE + 0x68) as _;
 /// Base address of the GPIO registers.
-const GPIO_BASE: usize = 0xFE200000;
+const GPIO_BASE: usize = 0xFE200000 + RAM_BASE;
 /// GPIO function selection register 1.
 const GPIO_FSEL1: *mut u32 = (GPIO_BASE + 0x4) as _;
 /// GPIO pull-up / pull-down register 0.
