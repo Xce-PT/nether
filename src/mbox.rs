@@ -11,11 +11,12 @@
 // TODO: Switch from a poll strategy to an interrupt strategy once a task
 // executor is implemented.
 
+use core::alloc::{AllocError, Allocator, Layout};
 use core::fmt::{Debug, Display, Formatter, Result as FormatResult};
 #[cfg(not(test))]
 use core::hint::spin_loop;
 use core::mem::{size_of, size_of_val, MaybeUninit};
-use core::ptr::addr_of;
+use core::ptr::{addr_of, NonNull};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 #[cfg(not(test))]
 use core::sync::atomic::{fence, Ordering};
@@ -23,18 +24,18 @@ use core::sync::atomic::{fence, Ordering};
 #[cfg(test)]
 use self::tests::*;
 #[cfg(not(test))]
-use crate::pgalloc::{Alloc as PageAlloc, AllocError as PageAllocError};
+use crate::alloc::DMA;
 #[cfg(not(test))]
 use crate::sync::LockAdvisor;
 #[cfg(not(test))]
-use crate::{PAGE_GRANULE, RAM_BASE};
+use crate::{DMA_RANGE, PERRY_RANGE, VC_RANGE};
 
 /// Offset of the physical RAM from the perspective of the video core.
 #[cfg(not(test))]
 const VC_OFFSET: usize = 0xC0000000;
 /// Base address of the video core mailbox registers.
 #[cfg(not(test))]
-const BASE: usize = 0xFE00B880 + RAM_BASE;
+const BASE: usize = 0x200B880 + PERRY_RANGE.start;
 /// Pointer to the inbox data register.
 #[cfg(not(test))]
 const INBOX_DATA: *const u32 = BASE as _;
@@ -75,30 +76,28 @@ pub struct Mailbox
 }
 
 /// Type-safe property tag message.
-pub struct Message<'a>
+pub struct Message
 {
     /// Allocated message buffer.
     buf: *mut u8,
-    /// Page allocator instance.
-    alloc: &'a PageAlloc,
 }
 
 /// Property tag message iterator.
 #[derive(Debug)]
-pub struct MessageIterator<'a, 'b>
+pub struct MessageIterator<'a>
 {
     /// Message whose contents are to be iterated.
-    msg: &'a Message<'b>,
+    msg: &'a Message,
     /// Next property tag.
     next: usize,
 }
 
 /// Property tag item returned by [`MessageIterator`].
 #[derive(Debug)]
-pub struct Tag<'a, 'b>
+pub struct Tag<'a>
 {
     /// Message being iterated.
-    msg: &'a Message<'b>,
+    msg: &'a Message,
     /// Tag ID.
     id: u32,
     /// Tag offset into the message.
@@ -121,7 +120,7 @@ pub struct MailboxExchangeError
 pub struct MessageCreationError
 {
     /// Source error that originated this error.
-    source: PageAllocError,
+    source: AllocError,
 }
 
 /// Message overflow error.
@@ -158,13 +157,13 @@ impl Mailbox
     /// * `msg`: The message to be sent.
     ///
     /// Either returns the provided message or an error with the response code.
-    pub fn exchange<'a>(&self, msg: Message<'a>) -> Result<Message<'a>, MailboxExchangeError>
+    pub fn exchange(&self, msg: Message) -> Result<Message, MailboxExchangeError>
     {
         unsafe { self.advisor.lock() };
         while unsafe { OUTBOX_STATUS.read_volatile() } & FULL_STATUS != 0 {
             spin_loop()
         }
-        let data = msg.buf as usize as u32 | 0xC0000008; // Channel and offset.
+        let data = unsafe { Self::map_to_vc(msg.buf) } | 0x8; // Channel.
         fence(Ordering::Release);
         unsafe { OUTBOX_DATA.write_volatile(data) };
         while unsafe { INBOX_STATUS.read_volatile() } & EMPTY_STATUS != 0 {
@@ -189,51 +188,59 @@ impl Mailbox
     /// Returns the converted buffer address in a format suitable to be sent to
     /// the video core.
     ///
-    /// Panics if `buf` is not within the first GB of physical RAM.
-    ///
-    /// The caller is responsible for ensuring that the buffer has been
-    /// allocated specifically for this purpose.
+    /// Panics if `buf` is not in the DMA region.
     pub unsafe fn map_to_vc<T>(buf: *mut T) -> u32
     {
-        let real = buf as usize & !RAM_BASE;
-        assert!(real < 0x40000000, "Buffer is not reachable by the video core");
-        (real | VC_OFFSET) as _
+        let virt = buf as usize;
+        // The DMA region is identity mapped.
+        assert!(DMA_RANGE.contains(&virt),
+                "Provided buffer at virtual address 0x{virt} is not in the DMA region");
+        (virt | VC_OFFSET) as u32 // The DMA range is identity mapped.
     }
 
-    /// Maps data received from the mailbox from a RAM address from the
+    /// Maps data received in the mailbox from a RAM address from the
     /// perspective of the video core to an address from the perspective of the
     /// ARM core.
+    ///
+    /// Panics if the address is not in the DMA region or in the region shared
+    /// with the VC.
+    ///
+    /// Returns the mapped address.
     pub fn map_from_vc<T>(data: u32) -> *mut T
     {
-        (data as usize & !VC_OFFSET | RAM_BASE) as _
+        let phys = data as usize & !VC_OFFSET;
+        if DMA_RANGE.contains(&phys) {
+            return phys as _; // The DMA range is identity mapped.
+        }
+        let vc_size = VC_RANGE.end - VC_RANGE.start;
+        let vc_phys_range = 0x40000000 - vc_size .. 0x40000000;
+        assert!(vc_phys_range.contains(&phys),
+                "Physical address 0x{phys:X} is not mapped to the DMA or VC regions");
+        (phys - vc_phys_range.start + VC_RANGE.start) as _
     }
 }
 
-impl<'a> Message<'a>
+impl Message
 {
     /// Maximum number of bytes in a message.
-    pub const CAPACITY: usize = PAGE_GRANULE;
+    pub const CAPACITY: usize = 0x100;
 
-    /// Creates and initializes a new message using the specified page
-    /// allocator.
-    ///
-    /// * `alloc`: The page allocator used to allocate an uncached buffer to
-    ///   communicate with the hardware.
+    /// Creates and initializes a new message.
     ///
     /// Returns the created message.
-    pub fn new_in(alloc: &'a PageAlloc) -> Result<Self, MessageCreationError>
+    pub fn new() -> Result<Self, MessageCreationError>
     {
-        let this = Self { buf: unsafe {
-                              alloc.alloc(Self::CAPACITY)
-                                   .map_err(|error| MessageCreationError { source: error })?
-                          },
-                          alloc };
+        let layout = Layout::from_size_align(Self::CAPACITY, 16).unwrap();
+        let buf: *mut u8 = DMA.allocate(layout)
+                              .map_err(|err| MessageCreationError { source: err })?
+                              .cast::<u8>()
+                              .as_ptr();
         unsafe {
-            this.buf.cast::<u32>().write(Self::CAPACITY as _); // Buffer size.
-            this.buf.cast::<u32>().add(1).write(REQUEST_CODE);
-            this.buf.cast::<u32>().add(2).write(END_TAG);
+            buf.cast::<u32>().write(Self::CAPACITY as _); // Buffer size.
+            buf.cast::<u32>().add(1).write(REQUEST_CODE);
+            buf.cast::<u32>().add(2).write(END_TAG);
         }
-        Ok(this)
+        Ok(Self { buf })
     }
 
     /// Adds a property tag to the message.
@@ -268,7 +275,7 @@ impl<'a> Message<'a>
     }
 }
 
-impl<'a> Debug for Message<'a>
+impl Debug for Message
 {
     fn fmt(&self, fmt: &mut Formatter) -> FormatResult
     {
@@ -292,18 +299,19 @@ impl<'a> Debug for Message<'a>
     }
 }
 
-impl<'a> Drop for Message<'a>
+impl Drop for Message
 {
     fn drop(&mut self)
     {
-        unsafe { self.alloc.dealloc(self.buf, Self::CAPACITY) };
+        let layout = Layout::from_size_align(Self::CAPACITY, 16).unwrap();
+        unsafe { DMA.deallocate(NonNull::new(self.buf).unwrap(), layout) };
     }
 }
 
-impl<'a, 'b> IntoIterator for &'a Message<'b>
+impl<'a> IntoIterator for &'a Message
 {
-    type IntoIter = MessageIterator<'a, 'b>;
-    type Item = Tag<'a, 'b>;
+    type IntoIter = MessageIterator<'a>;
+    type Item = Tag<'a>;
 
     fn into_iter(self) -> Self::IntoIter
     {
@@ -311,23 +319,23 @@ impl<'a, 'b> IntoIterator for &'a Message<'b>
     }
 }
 
-impl<'a, 'b> MessageIterator<'a, 'b>
+impl<'a> MessageIterator<'a>
 {
     /// Creates a new iterator.
     ///
     /// * `msg`: The message to iterate over.
     ///
     /// Returns the newly created iterator.
-    fn new(msg: &'a Message<'b>) -> Self
+    fn new(msg: &'a Message) -> Self
     {
         Self { msg,
                next: 8 /* Skip buffer length and request / response code. */ }
     }
 }
 
-impl<'a, 'b> Iterator for MessageIterator<'a, 'b>
+impl<'a> Iterator for MessageIterator<'a>
 {
-    type Item = Tag<'a, 'b>;
+    type Item = Tag<'a>;
 
     fn next(&mut self) -> Option<Self::Item>
     {
@@ -346,7 +354,7 @@ impl<'a, 'b> Iterator for MessageIterator<'a, 'b>
     }
 }
 
-impl<'a, 'b> Tag<'a, 'b>
+impl<'a> Tag<'a>
 {
     /// Creates a new property tag.
     ///
@@ -356,7 +364,7 @@ impl<'a, 'b> Tag<'a, 'b>
     /// * `msg`: Message from where this tag originates.
     ///
     /// Returns the newly created tag.
-    fn new(id: u32, offset: usize, len: usize, msg: &'a Message<'b>) -> Self
+    fn new(id: u32, offset: usize, len: usize, msg: &'a Message) -> Self
     {
         Self { msg, id, offset, len }
     }
@@ -424,50 +432,20 @@ impl Display for TagError
 #[cfg(test)]
 mod tests
 {
+    extern crate std;
+
+    use std::alloc::Global;
+
     use super::*;
 
-    pub const PAGE_GRANULE: usize = 0x100;
-
-    #[derive(Debug)]
-    pub struct PageAlloc
-    {
-        buf: *mut u8,
-    }
-
-    #[derive(Debug)]
-    pub struct PageAllocError;
-
-    impl PageAlloc
-    {
-        fn new(buf: &mut [u8; Message::CAPACITY]) -> Self
-        {
-            Self { buf: buf.as_mut_ptr() }
-        }
-
-        pub unsafe fn alloc(&self, _size: usize) -> Result<*mut u8, PageAllocError>
-        {
-            Ok(self.buf)
-        }
-
-        pub unsafe fn dealloc(&self, _base: *mut u8, _size: usize) {}
-    }
-
-    impl Display for PageAllocError
-    {
-        fn fmt(&self, fmt: &mut Formatter) -> FormatResult
-        {
-            write!(fmt, "Insufficient memory")
-        }
-    }
+    pub static DMA: Global = Global;
 
     #[test]
     fn message_new_empty_buffer()
     {
-        let mut buf = [0xFFu8; Message::CAPACITY];
-        let alloc = PageAlloc::new(&mut buf);
-        let msg = Message::new_in(&alloc).unwrap();
+        let msg = Message::new().unwrap();
         let expected: [u32; 3] = [Message::CAPACITY as _, REQUEST_CODE, END_TAG];
-        let actual = buf.as_mut_ptr().cast::<[u32; 3]>();
+        let actual = msg.buf.cast::<[u32; 3]>();
         assert_eq!(unsafe { *actual }, expected);
         assert!(msg.into_iter().next().is_none());
     }
@@ -475,12 +453,10 @@ mod tests
     #[test]
     fn message_with_tags_correctly_formatted()
     {
-        let mut buf = [0xFFu8; Message::CAPACITY];
-        let alloc = PageAlloc::new(&mut buf);
-        let mut msg = Message::new_in(&alloc).unwrap();
+        let mut msg = Message::new().unwrap();
         msg.add_tag(0x48003, *b"Hello").unwrap();
         msg.add_tag(0x48004, 25u32).unwrap();
-        let buf = buf.as_ptr().cast::<u32>();
+        let buf = msg.buf.cast::<u32>();
         assert_eq!(unsafe { buf.read() }, Message::CAPACITY as _);
         assert_eq!(unsafe { buf.add(1).read() }, REQUEST_CODE);
         assert_eq!(unsafe { buf.add(2).read() }, 0x48003);

@@ -13,6 +13,8 @@ SECTIONS {
     .bss ALIGN(0x1000) : {*(.bss .bss.*)} > ram = 0
 }
 
+dma_start = 0x1000;
+dma_end = 0x80000;
 boot_start = ADDR(.text.boot);
 boot_end = boot_start + SIZEOF(.text.boot) + 0xfff & ~0xfff;
 text_start = ADDR(.text);
@@ -23,4 +25,4 @@ data_start = ADDR(.data);
 data_end = data_start + SIZEOF(.data) + 0xfff & ~0xfff;
 bss_start = ADDR(.bss);
 bss_end = bss_start + SIZEOF(.bss) + 0xfff & ~0xfff;
-dynamic = bss_end;
+stack_x4 = 2M;
