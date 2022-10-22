@@ -12,7 +12,6 @@ use core::arch::asm;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::mbox::{Mailbox, Message, MBOX};
-use crate::pgalloc::ALLOC as PGALLOC;
 use crate::sync::{Lazy, Lock};
 use crate::touch::Info as TouchInfo;
 
@@ -86,7 +85,7 @@ impl Video
     /// Returns the newly created instance.
     fn new() -> Lock<Self>
     {
-        let mut msg = Message::new_in(&PGALLOC).unwrap();
+        let mut msg = Message::new().unwrap();
         let dim = Dimensions { width: 800,
                                height: 480 };
         msg.add_tag(PHYS_DIM_TAG, dim).unwrap();
@@ -126,12 +125,37 @@ impl Video
         Lock::new(this)
     }
 
+    /// Clears the off-screen buffer.
+    pub fn clear(&mut self)
+    {
+        // Draw to the off-screen frame buffer.
+        let base = if self.count & 1 == 0 {
+            unsafe { self.base.add(self.size / 4 / 2) }
+        } else {
+            self.base
+        };
+        unsafe {
+            asm!(
+                "0:",
+                "cmp {base}, {top}",
+                "beq 0f",
+                "stp {pat}, {pat}, [{base}], #0x10",
+                "b 0b",
+                "0:",
+                base = inout (reg) base => _,
+                top = in (reg) base.add(self.size / 4 / 2),
+                pat = in (reg) 0xff000000ff000000usize,
+                options (nostack)
+            );
+        }
+    }
+
     /// Moves the display to the currently off-screen half of the frame buffer
     /// to show the latest frame.
     pub fn vsync(&mut self)
     {
         if self.count != 0 {
-            let mut msg = Message::new_in(&PGALLOC).unwrap();
+            let mut msg = Message::new().unwrap();
             let offset = Offset { x: 0,
                                   y: if self.count & 0x1 == 0 { 0 } else { self.height as _ } };
             msg.add_tag(OFFSET_TAG, offset).unwrap();

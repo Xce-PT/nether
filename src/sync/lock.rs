@@ -166,7 +166,7 @@ impl Advisor
         assert_eq!(affinity,
                    self.affinity.load(Ordering::Relaxed),
                    "Attempted to relinquish a lock that is not held by this core");
-        if self.count.fetch_sub(1, Ordering::Relaxed) <= 1 {
+        if self.count.fetch_sub(1, Ordering::Relaxed) > 1 {
             return;
         }
         self.affinity.store(0x0, Ordering::SeqCst);
@@ -176,14 +176,14 @@ impl Advisor
 #[cfg(test)]
 impl Advisor
 {
-    const fn new() -> Self
+    pub const fn new() -> Self
     {
         Self
     }
 
-    unsafe fn lock(&self) {}
+    pub unsafe fn lock(&self) {}
 
-    unsafe fn unlock(&self) {}
+    pub unsafe fn unlock(&self) {}
 }
 
 unsafe impl<T> Sync for Lock<T> {}

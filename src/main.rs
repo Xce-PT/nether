@@ -5,11 +5,16 @@
 #![cfg_attr(not(test), no_main)]
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
+#![feature(allocator_api)]
+#![feature(default_alloc_error_handler)]
+#![feature(nonnull_slice_from_raw_parts)]
+#![feature(strict_provenance)]
+#![feature(slice_ptr_get)]
 
+mod alloc;
 #[cfg(not(test))]
 mod irq;
 mod mbox;
-mod pgalloc;
 mod sync;
 #[cfg(not(test))]
 mod touch;
@@ -32,44 +37,39 @@ use core::write;
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
-use self::pgalloc::ALLOC as PGALLOC;
-#[cfg(not(test))]
 use self::touch::TOUCH;
 #[cfg(not(test))]
 use self::uart::UART;
 #[cfg(not(test))]
 use self::video::VIDEO;
 
-/// Physical RAM base address.
+/// Heap range.
 #[cfg(not(test))]
-const RAM_BASE: usize = 0xFFFFFFF800000000;
-/// Total amount of physical RAM.
+const HEAP_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (64 << 20);
+/// DMA RANGE.
 #[cfg(not(test))]
-const TOTAL_RAM: usize = 1 << 30;
-/// Free RAM sections.
+const DMA_RANGE: Range<usize> = 0x1000 .. 0x80000;
+/// Peripherals range.
 #[cfg(not(test))]
-const FREE_RAM: [Range<usize>; 4] = [0x0 .. 0x1160000,
-                                     0x1510000 .. 0x1AC00000,
-                                     0x2EC00000 .. 0x2EFF2000,
-                                     0x2F000000 .. 0x37400000];
-/// Smallest size of a memory page.
+const PERRY_RANGE: Range<usize> = 0x80000000 .. 0x84000000;
+/// Video core reserved range.
 #[cfg(not(test))]
-const PAGE_GRANULE: usize = 0x1000;
-/// Pixel valve 1 IRQ.
-#[cfg(not(test))]
-const PV_IRQ: usize = 142;
+const VC_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
 /// Pixel valve 1 base address.
 #[cfg(not(test))]
-const PV_BASE: usize = 0xFE207000 | RAM_BASE;
-/// Pixel valve 1 interrupt enabler register.
+const PV1_BASE: usize = 0x2207000 + PERRY_RANGE.start;
+/// PV1 interrupt enable register.
 #[cfg(not(test))]
-const PV_INT: *mut u32 = (PV_BASE + 0x24) as _;
-/// Pixel valve 1 interrupt status and acknowledgement register.
+const PV1_INTEN: *mut u32 = (PV1_BASE + 0x24) as _;
+/// PV1 status and acknowledgement register.
 #[cfg(not(test))]
-const PV_STATUS: *mut u32 = (PV_BASE + 0x28) as _;
-/// VSync interrupt.
+const PV1_STAT: *mut u32 = (PV1_BASE + 0x28) as _;
+/// PV1 IRQ.
 #[cfg(not(test))]
-const VSYNC_PV_INT: u32 = 0x10;
+const PV1_IRQ: usize = 142;
+/// PV VSync interrupt enable flag.
+#[cfg(not(test))]
+const PV_VSYNC: u32 = 0x10;
 
 #[cfg(not(test))]
 global_asm!(include_str!("boot.s"));
@@ -77,19 +77,18 @@ global_asm!(include_str!("boot.s"));
 /// Entry point.
 #[cfg(not(test))]
 #[no_mangle]
-pub extern "C" fn main() -> !
+pub extern "C" fn main(affinity: u8) -> !
 {
-    let dynamic: usize;
-    unsafe { asm!("adrp {dynamic}, dynamic", dynamic = out (reg) dynamic) };
-    let mut regions = FREE_RAM;
-    regions[0].start = dynamic;
-    unsafe { PGALLOC.track(&regions) };
-    unsafe { PV_STATUS.write_volatile(VSYNC_PV_INT) };
-    unsafe { PV_INT.write_volatile(VSYNC_PV_INT) };
-    let mut irq = IRQ.lock();
-    irq.listen(PV_IRQ, tick);
-    drop(irq);
-    debug!("Boot complete");
+    debug!("Booted core #{affinity}");
+    if affinity != 0 {
+        halt()
+    }
+    IRQ.lock().listen(PV1_IRQ, tick);
+    VIDEO.lock().clear();
+    unsafe {
+        PV1_STAT.write_volatile(PV_VSYNC);
+        PV1_INTEN.write_volatile(PV_VSYNC);
+    };
     loop {
         IRQ.lock().handle();
         sleep();
@@ -101,27 +100,46 @@ pub extern "C" fn main() -> !
 #[no_mangle]
 pub extern "C" fn fault(kind: usize) -> !
 {
+    let affinity: usize;
     let level: usize;
     let syndrome: usize;
     let addr: usize;
     let ret: usize;
     let state: usize;
     unsafe {
-        asm!("mrs {el}, currentel", "lsr {el}, {el}, #2", el = out (reg) level, options (nomem, nostack, preserves_flags))
+        asm!(
+            "mrs {aff}, mpidr_el1",
+            "and {aff}, {aff}, #0x3",
+            "mrs {el}, currentel",
+            "lsr {el}, {el}, #2",
+            aff = out (reg) affinity,
+            el = out (reg) level,
+            options (nomem, nostack, preserves_flags));
+        match level {
+            2 => asm!(
+                    "mrs {synd}, esr_el2",
+                    "mrs {addr}, far_el2",
+                    "mrs {ret}, elr_el2",
+                    "mrs {state}, spsr_el2",
+                    synd = out (reg) syndrome,
+                    addr = out (reg) addr,
+                    ret = out (reg) ret,
+                    state = out (reg) state,
+                    options (nomem, nostack, preserves_flags)),
+            1 => asm!(
+                        "mrs {synd}, esr_el1",
+                        "mrs {addr}, far_el1",
+                        "mrs {ret}, elr_el1",
+                        "mrs {state}, spsr_el1",
+                        synd = out (reg) syndrome,
+                        addr = out (reg) addr,
+                        ret = out (reg) ret,
+                        state = out (reg) state,
+                        options (nomem, nostack, preserves_flags)),
+            _ => panic!("Exception caught at unsupported level {level}"),
+        }
     };
-    match level {
-        3 => unsafe {
-            asm!("mrs {synd}, esr_el3", "mrs {addr}, far_el3", "mrs {ret}, elr_el3", "mrs {state}, spsr_el3", synd = out (reg) syndrome, addr = out (reg) addr, ret = out (reg) ret, state = out (reg) state, options (nomem, nostack, preserves_flags))
-        },
-        2 => unsafe {
-            asm!("mrs {synd}, esr_el2", "mrs {addr}, far_el2", "mrs {ret}, elr_el2", "mrs {state}, spsr_el2", synd = out (reg) syndrome, addr = out (reg) addr, ret = out (reg) ret, state = out (reg) state, options (nomem, nostack, preserves_flags))
-        },
-        1 => unsafe {
-            asm!("mrs {synd}, esr_el1", "mrs {addr}, far_el1", "mrs {ret}, elr_el1", "mrs {state}, spsr_el1", synd = out (reg) syndrome, addr = out (reg) addr, ret = out (reg) ret, state = out (reg) state, options (nomem, nostack, preserves_flags))
-        },
-        _ => panic!("Unknown exception caught at level {level}"),
-    }
-    panic!("Fault at level {level}: Kind: 0x{kind:x}, Syndrome: 0x{syndrome:x}, Address: 0x{addr:x}, Location: 0x{ret:x}, State: 0x{state:x}");
+    panic!("Core #{affinity} triggered an exception at level {level}: Kind: 0x{kind:x}, Syndrome: 0x{syndrome:x}, Address: 0x{addr:x}, Location: 0x{ret:x}, State: 0x{state:x}");
 }
 
 /// Halts the system.
@@ -129,6 +147,11 @@ pub extern "C" fn fault(kind: usize) -> !
 #[no_mangle]
 pub extern "C" fn halt() -> !
 {
+    let affinity: usize;
+    unsafe {
+        asm!("mrs {affinity}, mpidr_el1", "and {affinity}, {affinity}, #0x3", affinity = out (reg) affinity, options (nomem, nostack, preserves_flags))
+    };
+    debug!("Halted core #{affinity}");
     unsafe {
         asm!("msr daifset, #0x3",
              "0:",
@@ -144,9 +167,9 @@ fn main() {}
 
 /// Performs a single iteration of the main loop..
 #[cfg(not(test))]
-fn tick()
+fn tick(irq: usize)
 {
-    if unsafe { PV_STATUS.read_volatile() & VSYNC_PV_INT } == 0 {
+    if irq != PV1_IRQ {
         return;
     }
     let mut video = VIDEO.lock();
@@ -154,7 +177,7 @@ fn tick()
     let touches = touch.poll();
     video.draw_circles(touches);
     video.vsync();
-    unsafe { PV_STATUS.write_volatile(VSYNC_PV_INT) };
+    unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
 }
 
 /// Halts the system with a diagnostic error message.

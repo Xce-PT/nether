@@ -7,18 +7,23 @@
 //! * [CoreLink GIC-400 Generic Interrupt Controller Technical Reference Manual](https://developer.arm.com/documentation/ddi0471/b)
 //! * [ARM Generic Interrupt Controller Architecture Specification](https://developer.arm.com/documentation/ihi0048/b)
 
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::ops::{Index, IndexMut};
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::sync::{Lazy, Lock};
-use crate::RAM_BASE;
+use crate::PERRY_RANGE;
 
 /// Number of SPIs on the BCM2711.
 const SPI_COUNT: usize = 192;
 /// Total number of IRQs on the BCM2711.
 const IRQ_COUNT: usize = SPI_COUNT + 32;
 /// Base address of theGIC 400.
-const GIC_BASE: usize = 0xFF840000 + RAM_BASE;
+const GIC_BASE: usize = 0x3840000 + PERRY_RANGE.start;
 /// IRQ set enable registers.
 const GICD_ISENABLER: *mut [u32; IRQ_COUNT >> 5] = (GIC_BASE + 0x1100) as _;
 /// IRQ clear enable registers.
@@ -43,9 +48,10 @@ pub static IRQ: Lazy<Lock<Irq>> = Lazy::new(Irq::new);
 pub struct Irq
 {
     /// Registered handlers.
-    handlers: [Option<fn() -> ()>; IRQ_COUNT], /* TODO: Replace with a dynamic data structure
-                                                * once a global allocator is implemented. */
+    handlers: BTreeMap<usize, Vec<Handler>>,
 }
+
+type Handler = fn(usize) -> ();
 
 impl Irq
 {
@@ -74,26 +80,29 @@ impl Irq
                              .skip(8)
                              .for_each(|element| write_volatile(element, 0xF));
         }
-        let this = Self { handlers: [None; IRQ_COUNT] };
+        let this = Self { handlers: BTreeMap::new() };
         Lock::new(this)
     }
 
     /// Listens for the specified IRQ, and installs a handler for it.
-    pub fn listen(&mut self, id: usize, handler: fn() -> ())
+    pub fn listen(&mut self, id: usize, handler: Handler)
     {
         assert!(id < IRQ_COUNT, "IRQ #{id} is out of range");
-        assert!(self.handlers[id].is_none(), "IRQ #{id} already has a handler");
-        // Figure out which register and bit to enable for the given IRQ.
-        let val = (0x1 << (id & 0x1F)) as u32;
-        let idx = id >> 5;
-        unsafe { write_volatile((*GICD_ISENABLER).index_mut(idx), val) };
-        // Set the IRQ to be level-triggered.
-        let bit = (0x2 << (id << 1 & 0x1F)) as u32;
-        let idx = id >> 4;
-        let val = unsafe { read_volatile((*GICD_ICFGR).index(idx)) };
-        let val = val & !bit;
-        unsafe { write_volatile((*GICD_ICFGR).index_mut(idx), val) };
-        self.handlers[id] = Some(handler);
+        if self.handlers.get(&id).is_none() {
+            // Figure out which register and bit to enable for the given IRQ.
+            let val = (0x1 << (id & 0x1F)) as u32;
+            let idx = id >> 5;
+            unsafe { write_volatile((*GICD_ISENABLER).index_mut(idx), val) };
+            // Set the IRQ to be level-triggered.
+            let bit = (0x2 << (id << 1 & 0x1F)) as u32;
+            let idx = id >> 4;
+            let val = unsafe { read_volatile((*GICD_ICFGR).index(idx)) };
+            let val = val & !bit;
+            unsafe { write_volatile((*GICD_ICFGR).index_mut(idx), val) };
+            self.handlers.insert(id, vec![handler]);
+        } else {
+            self.handlers.get_mut(&id).unwrap().push(handler);
+        }
     }
 
     /// Checks for and processes all pending IRQs.
@@ -107,8 +116,8 @@ impl Irq
             if id >= IRQ_COUNT {
                 break;
             }
-            if let Some(handler) = self.handlers[id] {
-                handler()
+            if let Some(list) = self.handlers.get(&id) {
+                list.iter().for_each(|handler| handler(id));
             } else {
                 panic!("Missing handler for IRQ #{id}")
             };

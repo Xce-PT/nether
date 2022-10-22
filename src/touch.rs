@@ -2,11 +2,14 @@
 //!
 //! There is no official documentation for this driver, so its implementation is my interpretation of the implementation in the [Linux kernel source](https://github.com/raspberrypi/linux/blob/rpi-5.15.y/drivers/input/touchscreen/raspberrypi-ts.c).
 
-use core::mem::size_of;
+extern crate alloc;
+
+use alloc::boxed::Box;
+use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
+use crate::alloc::{Engine as AllocatorEngine, DMA};
 use crate::mbox::{Mailbox, Message, MBOX};
-use crate::pgalloc::ALLOC as PGALLOC;
 use crate::sync::{Lazy, Lock};
 
 /// Tag to tell the video core about the location of the touchscreen buffer.
@@ -25,7 +28,7 @@ pub static TOUCH: Lazy<Lock<Touch>> = Lazy::new(Touch::new);
 pub struct Touch
 {
     /// Touchscreen buffer.
-    buf: *mut Registers,
+    regs: Box<MaybeUninit<Registers>, AllocatorEngine<'static>>,
     /// Cached touch point information.
     info: [Info; MAX_POINTS],
     /// Length of the cache.
@@ -84,13 +87,13 @@ impl Touch
     /// Returns the initialized touchscreen driver.
     fn new() -> Lock<Self>
     {
-        let buf = unsafe { PGALLOC.alloc(size_of::<Registers>()).unwrap().cast::<Registers>() };
-        unsafe { (*buf).points_len = INVALID_POINTS };
-        let mut msg = Message::new_in(&PGALLOC).unwrap();
-        let data = unsafe { Mailbox::map_to_vc(buf) };
+        let mut regs = Box::<Registers, AllocatorEngine>::new_uninit_in(DMA);
+        unsafe { MaybeUninit::assume_init(*regs).points_len = INVALID_POINTS };
+        let mut msg = Message::new().unwrap();
+        let data = unsafe { Mailbox::map_to_vc(&mut *regs) };
         msg.add_tag(TOUCHBUF_TAG, data).unwrap();
         MBOX.exchange(msg).unwrap();
-        let this = Self { buf,
+        let this = Self { regs,
                           info: [Info { x: 0, y: 0 }; MAX_POINTS],
                           info_len: 0 };
         Lock::new(this)
@@ -103,7 +106,7 @@ impl Touch
     pub fn poll(&mut self) -> &[Info]
     {
         fence(Ordering::Acquire);
-        let regs: Registers = unsafe { self.buf.read() };
+        let regs = unsafe { (*self.regs).assume_init() };
         if regs.points_len == 0 {
             self.info_len = 0;
             return &self.info[0 .. 0];
@@ -117,7 +120,7 @@ impl Touch
             self.info[idx] = Info { x, y };
         }
         self.info_len = regs.points_len as _;
-        unsafe { (*self.buf).points_len = INVALID_POINTS };
+        unsafe { MaybeUninit::assume_init(*self.regs).points_len = INVALID_POINTS };
         fence(Ordering::Release);
         &self.info[0 .. self.info_len]
     }
