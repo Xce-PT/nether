@@ -59,7 +59,7 @@ boot:
     msr vmpidr_el2, x0
     mov x0, #0xc4
     msr spsr_el2, x0
-    adr x0, main
+    adr x0, start
     msr elr_el2, x0
     msr sp_el1, fp
 1:
@@ -73,7 +73,7 @@ boot:
     msr vbar_el1, x0
     mov x0, #0xc4
     msr spsr_el1, x0
-    adr x0, main
+    adr x0, start
     msr elr_el1, x0
     // Core 0 tasks.
     mrs x0, mpidr_el1
@@ -202,7 +202,7 @@ boot:
     movk x0, #0x1b9f
     msr sctlr_el1, x0
     isb
-    // Jump to main at EL1 with SP_EL0.
+    // Jump to Rust code at EL1 with SP_EL0.
     mrs x0, mpidr_el1
     and x0, x0, #0x3
     mov fp, #1 << 32

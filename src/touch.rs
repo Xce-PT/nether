@@ -6,14 +6,13 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::mem::MaybeUninit;
+use core::simd::u32x2;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::alloc::{Engine as AllocatorEngine, DMA};
-use crate::mbox::{Mailbox, Message, MBOX};
+use crate::mbox::{Request, RequestProperty, MBOX};
 use crate::sync::{Lazy, Lock};
 
-/// Tag to tell the video core about the location of the touchscreen buffer.
-const TOUCHBUF_TAG: u32 = 0x4801F;
 /// Maximum number of touch points tracked by the video core.
 const MAX_POINTS: usize = 10;
 /// Invalid dummy value used to verify whether the buffer has been updated since
@@ -28,28 +27,26 @@ pub static TOUCH: Lazy<Lock<Touch>> = Lazy::new(Touch::new);
 pub struct Touch
 {
     /// Touchscreen buffer.
-    regs: Box<MaybeUninit<Registers>, AllocatorEngine<'static>>,
+    state: Box<State, AllocatorEngine<'static>>,
     /// Cached touch point information.
-    info: [Info; MAX_POINTS],
-    /// Length of the cache.
-    info_len: usize,
+    cache: Cache,
 }
 
 /// Touch point information.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
-pub struct Info
+pub struct Cache
 {
-    /// Horizontal coordinate.
-    pub x: i32,
-    /// Vertical coordinate.
-    pub y: i32,
+    /// Touch point count.
+    len: usize,
+    /// List of touch points.
+    points: [u32x2; MAX_POINTS],
 }
 
 /// Registers mapped in the touchscreen buffer.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
-struct Registers
+struct State
 {
     /// Not sure about the purpose of this field.
     _mode: u8,
@@ -87,41 +84,59 @@ impl Touch
     /// Returns the initialized touchscreen driver.
     fn new() -> Lock<Self>
     {
-        let mut regs = Box::<Registers, AllocatorEngine>::new_uninit_in(DMA);
-        unsafe { MaybeUninit::assume_init(*regs).points_len = INVALID_POINTS };
-        let mut msg = Message::new().unwrap();
-        let data = unsafe { Mailbox::map_to_vc(&mut *regs) };
-        msg.add_tag(TOUCHBUF_TAG, data).unwrap();
-        MBOX.exchange(msg).unwrap();
-        let this = Self { regs,
-                          info: [Info { x: 0, y: 0 }; MAX_POINTS],
-                          info_len: 0 };
+        #[allow(invalid_value)] // Filled by the hardware.
+        #[allow(clippy::uninit_assumed_init)] // Same as above.
+        let mut state = unsafe { MaybeUninit::<State>::uninit().assume_init() };
+        state.points_len = INVALID_POINTS;
+        let mut state = Box::new_in(state, DMA);
+        let mut req = Request::new();
+        req.push(RequestProperty::SetTouchBuffer { buf: state.as_mut() as *mut State as _ });
+        MBOX.exchange(req);
+        let this = Self { state,
+                          cache: Cache::new() };
         Lock::new(this)
     }
 
-    /// Polls the touchscreen buffer looking for new touch point information.
+    /// Polls the touchscreen buffer looking for new touch point information,
+    /// filling the cache if new data is found.
     ///
-    /// Returns either new or cached touch information depending on
-    /// availability.
-    pub fn poll(&mut self) -> &[Info]
+    /// Returns the cached information.
+    pub fn poll(&mut self) -> Cache
     {
         fence(Ordering::Acquire);
-        let regs = unsafe { (*self.regs).assume_init() };
-        if regs.points_len == 0 {
-            self.info_len = 0;
-            return &self.info[0 .. 0];
+        let state = *self.state;
+        if state.points_len == INVALID_POINTS {
+            return self.cache;
         }
-        if regs.points_len == INVALID_POINTS {
-            return &self.info[0 .. self.info_len];
-        }
-        for idx in 0 .. regs.points_len as usize {
-            let x = regs.points[idx].x_lsb as i32 | (regs.points[idx].x_msb as i32 & 0x3) << 8;
-            let y = regs.points[idx].y_lsb as i32 | (regs.points[idx].y_msb as i32 & 0x3) << 8;
-            self.info[idx] = Info { x, y };
-        }
-        self.info_len = regs.points_len as _;
-        unsafe { MaybeUninit::assume_init(*self.regs).points_len = INVALID_POINTS };
+        self.state.points_len = INVALID_POINTS;
         fence(Ordering::Release);
-        &self.info[0 .. self.info_len]
+        if state.points_len == 0 {
+            self.cache.len = 0;
+            return self.cache;
+        }
+        for idx in 0 .. state.points_len as usize {
+            let x = state.points[idx].x_lsb as i32 | (state.points[idx].x_msb as i32 & 0x3) << 8;
+            let y = state.points[idx].y_lsb as i32 | (state.points[idx].y_msb as i32 & 0x3) << 8;
+            self.cache.points[idx] = u32x2::from_array([x as _, y as _]);
+        }
+        self.cache.len = state.points_len as _;
+        self.cache
+    }
+}
+
+impl Cache
+{
+    /// Creates and initializes a new cache container.
+    ///
+    /// Returns the created cache container.
+    fn new() -> Self
+    {
+        Self { len: 0,
+               points: [u32x2::from_array([0 as _, 0 as _]); MAX_POINTS] }
+    }
+
+    pub fn as_slice(&self) -> &[u32x2]
+    {
+        &self.points[0 .. self.len]
     }
 }
