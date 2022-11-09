@@ -9,11 +9,9 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
-use core::ops::{Index, IndexMut};
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::write_volatile;
 
 use crate::sync::{Lazy, Lock};
 use crate::PERRY_RANGE;
@@ -42,23 +40,21 @@ const GICC_IAR: *mut u32 = (GIC_BASE + 0x200C) as _;
 const GICC_EOIR: *mut u32 = (GIC_BASE + 0x2010) as _;
 
 /// Global interrupt controller driver.
-pub static IRQ: Lazy<Lock<Irq>> = Lazy::new(Irq::new);
+pub static IRQ: Lazy<Irq> = Lazy::new(Irq::new);
 
 /// IRQ driver.
 pub struct Irq
 {
     /// Registered handlers.
-    handlers: BTreeMap<usize, Vec<Handler>>,
+    handlers: Lock<BTreeMap<u32, Box<dyn Fn() + Send + 'static>>>,
 }
-
-type Handler = fn(usize) -> ();
 
 impl Irq
 {
     /// Creates and initializes a new interrupt controller driver.
     ///
     /// Returns the newly created driver.
-    fn new() -> Lock<Self>
+    fn new() -> Self
     {
         unsafe {
             // Disable all IRQs.
@@ -71,38 +67,33 @@ impl Irq
             // them.
             (*GICD_IPRIORITYR).iter_mut()
                               .for_each(|element| write_volatile(element, 0x7F));
-            // Make all SPIs edge triggered.
+            // Make all SPIs level triggered.
             (*GICD_ICFGR).iter_mut()
                          .skip(1)
-                         .for_each(|element| write_volatile(element, 0xFFFFFFFF));
+                         .for_each(|element| write_volatile(element, 55555555));
             // Deliver all SPIs to all cores..
             (*GICD_ITARGETSR).iter_mut()
                              .skip(8)
                              .for_each(|element| write_volatile(element, 0xF));
         }
-        let this = Self { handlers: BTreeMap::new() };
-        Lock::new(this)
+        Self { handlers: Lock::new(BTreeMap::new()) }
     }
 
-    /// Listens for the specified IRQ, and installs a handler for it.
-    pub fn listen(&mut self, id: usize, handler: Handler)
+    /// Registers a handler to be called when the specified IRQ is triggered.
+    ///
+    /// * `irq`: IRQ to wait for.
+    /// * `handler`: Handler function to register.
+    pub fn register(&self, irq: u32, handler: impl Fn() + Send + 'static)
     {
-        assert!(id < IRQ_COUNT, "IRQ #{id} is out of range");
-        if self.handlers.get(&id).is_none() {
-            // Figure out which register and bit to enable for the given IRQ.
-            let val = (0x1 << (id & 0x1F)) as u32;
-            let idx = id >> 5;
-            unsafe { write_volatile((*GICD_ISENABLER).index_mut(idx), val) };
-            // Set the IRQ to be level-triggered.
-            let bit = (0x2 << (id << 1 & 0x1F)) as u32;
-            let idx = id >> 4;
-            let val = unsafe { read_volatile((*GICD_ICFGR).index(idx)) };
-            let val = val & !bit;
-            unsafe { write_volatile((*GICD_ICFGR).index_mut(idx), val) };
-            self.handlers.insert(id, vec![handler]);
-        } else {
-            self.handlers.get_mut(&id).unwrap().push(handler);
-        }
+        assert!((irq as usize) < IRQ_COUNT, "IRQ #{irq} is out of range");
+        let mut handlers = self.handlers.lock();
+        assert!(handlers.get(&irq).is_none(), "IRQ {irq} already has a handler");
+        // Figure out which register and bit to enable for the given IRQ.
+        let val = 0x1 << (irq & 0x1F);
+        let idx = irq as usize >> 5;
+        unsafe { write_volatile((*GICD_ISENABLER).get_mut(idx).unwrap(), val) };
+        let handler = Box::new(handler);
+        handlers.insert(irq, handler);
     }
 
     /// Checks for and processes all pending IRQs.
@@ -111,17 +102,16 @@ impl Irq
     pub fn handle(&self)
     {
         loop {
-            let val = unsafe { (GICC_IAR as *const u32).read_volatile() as usize };
-            let id = val & 0x3FF; // Strip sender info from SGIs.
-            if id >= IRQ_COUNT {
+            let val = unsafe { GICC_IAR.read_volatile() };
+            let irq = val & 0x3FF; // Strip sender info from SGIs.
+            if irq as usize >= IRQ_COUNT {
                 break;
             }
-            if let Some(list) = self.handlers.get(&id) {
-                list.iter().for_each(|handler| handler(id));
-            } else {
-                panic!("Missing handler for IRQ #{id}")
-            };
-            unsafe { (GICC_EOIR as *mut u32).write_volatile(val as _) };
+            self.handlers
+                .lock()
+                .get(&irq)
+                .expect("Received an IRQ without a handler")();
+            unsafe { GICC_EOIR.write_volatile(val as _) };
         }
     }
 }

@@ -8,74 +8,44 @@
 //! tag is being used to move the display to the top of the frame buffer every
 //! even frame and to the bottom of the frame buffer every odd frame.
 
-use core::arch::asm;
-use core::sync::atomic::{fence, Ordering};
+use core::mem::align_of;
+use core::ptr::null_mut;
+use core::simd::{mask32x4, u32x2, u32x4, SimdPartialOrd};
+use core::sync::atomic::{fence, AtomicU64, Ordering};
 
-use crate::mbox::{Mailbox, Message, MBOX};
+use crate::irq::IRQ;
+use crate::mbox::{Request, RequestProperty, ResponseProperty, MBOX};
 use crate::sync::{Lazy, Lock};
-use crate::touch::Info as TouchInfo;
+use crate::PERRY_RANGE;
 
-/// Frame buffer allocation property tag.
-const ALLOC_TAG: u32 = 0x40001;
-/// Frame buffer physical dimensions property tag.
-const PHYS_DIM_TAG: u32 = 0x48003;
-/// Frame buffer virtual dimensions property tag.
-const VIRT_DIM_TAG: u32 = 0x48004;
-/// Frame buffer pixel depth property tag.
-const PIX_DEPTH_TAG: u32 = 0x48005;
-/// Frame buffer panning property tag.
-const OFFSET_TAG: u32 = 0x48009;
+/// Pixel valve 1 base address.
+const PV1_BASE: usize = 0x2207000 + PERRY_RANGE.start;
+/// PV1 interrupt enable register.
+const PV1_INTEN: *mut u32 = (PV1_BASE + 0x24) as _;
+/// PV1 status and acknowledgement register.
+const PV1_STAT: *mut u32 = (PV1_BASE + 0x28) as _;
+/// PV1 IRQ.
+const PV1_IRQ: u32 = 142;
+/// PV VSync interrupt enable flag.
+const PV_VSYNC: u32 = 0x10;
 
 /// Global video driver instance.
-pub static VIDEO: Lazy<Lock<Video>> = Lazy::new(Video::new);
+pub static VIDEO: Lazy<Video> = Lazy::new(Video::new);
 
 /// Video driver.
 #[derive(Debug)]
 pub struct Video
 {
     /// Frame buffer base.
-    base: *mut u32,
+    base: Lock<*mut u32x4>,
     /// Frame buffer size in bytes.
     size: usize,
-    /// Frame buffer width.
+    /// Display width.
     width: usize,
-    /// Frame buffer height.
+    /// Display height.
     height: usize,
     /// Frame counter.
-    count: u64,
-}
-
-/// Frame buffer dimensions.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-struct Dimensions
-{
-    /// Width of the frame buffer.
-    width: u32,
-    /// Height of the frame buffer.
-    height: u32,
-}
-
-/// Frame buffer allocation.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-struct Alloc
-{
-    /// Base of the allocated memory, or alignment on request.
-    base: u32,
-    /// Size of the allocated memory.
-    size: u32,
-}
-
-/// Frame buffer panning offset.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-struct Offset
-{
-    /// Horizontal coordinate of the display's top side in the frame buffer.
-    x: u32,
-    /// Vertical coordinate of the display's left side in the frame buffer.
-    y: u32,
+    count: AtomicU64,
 }
 
 impl Video
@@ -83,194 +53,89 @@ impl Video
     /// Creates and initializes a new video driver instance.
     ///
     /// Returns the newly created instance.
-    fn new() -> Lock<Self>
+    fn new() -> Self
     {
-        let mut msg = Message::new().unwrap();
-        let dim = Dimensions { width: 800,
-                               height: 480 };
-        msg.add_tag(PHYS_DIM_TAG, dim).unwrap();
-        let dim = Dimensions { width: 800,
-                               height: 480 * 2 };
-        msg.add_tag(VIRT_DIM_TAG, dim).unwrap();
-        let depth = 32u32;
-        msg.add_tag(PIX_DEPTH_TAG, depth).unwrap();
-        let alloc = Alloc { base: 16, // Alignment.
-                            size: 0 };
-        msg.add_tag(ALLOC_TAG, alloc).unwrap();
-        let msg = MBOX.exchange(msg).unwrap();
-        let mut base: *mut u32 = 0usize as _;
-        let mut size = 0usize;
-        let mut width = 0usize;
-        let mut height = 0usize;
-        for tag in &msg {
-            match tag.id() {
-                ALLOC_TAG => {
-                    let alloc = unsafe { tag.interpret_as::<Alloc>().unwrap() };
-                    base = Mailbox::map_from_vc(alloc.base);
-                    size = alloc.size as _;
+        let mut req = Request::new();
+        req.push(RequestProperty::SetPhysicalSize { width: 800,
+                                                    height: 480 });
+        req.push(RequestProperty::SetVirtualSize { width: 800,
+                                                   height: 480 * 2 });
+        req.push(RequestProperty::SetDepth { bits: 32 });
+        req.push(RequestProperty::Allocate { align: align_of::<u32x4>() });
+        let resp = MBOX.exchange(req);
+        let mut this = Self { base: Lock::new(null_mut()),
+                              size: 0,
+                              width: 0,
+                              height: 0,
+                              count: AtomicU64::new(0) };
+        for prop in resp {
+            match prop {
+                ResponseProperty::Allocate { base, size } => {
+                    *this.base.lock() = base.cast();
+                    this.size = size;
                 }
-                PHYS_DIM_TAG => {
-                    let dim = unsafe { tag.interpret_as::<Dimensions>().unwrap() };
-                    width = dim.width as _;
-                    height = dim.height as _;
+                ResponseProperty::SetPhysicalSize { width, height } => {
+                    this.width = width;
+                    this.height = height;
                 }
                 _ => continue,
             }
         }
-        let this = Self { base,
-                          size,
-                          width,
-                          height,
-                          count: 0 };
-        Lock::new(this)
-    }
-
-    /// Clears the off-screen buffer.
-    pub fn clear(&mut self)
-    {
-        // Draw to the off-screen frame buffer.
-        let base = if self.count & 1 == 0 {
-            unsafe { self.base.add(self.size / 4 / 2) }
-        } else {
-            self.base
-        };
+        IRQ.register(PV1_IRQ, Self::vsync);
         unsafe {
-            asm!(
-                "0:",
-                "cmp {base}, {top}",
-                "beq 0f",
-                "stp {pat}, {pat}, [{base}], #0x10",
-                "b 0b",
-                "0:",
-                base = inout (reg) base => _,
-                top = in (reg) base.add(self.size / 4 / 2),
-                pat = in (reg) 0xff000000ff000000usize,
-                options (nostack)
-            );
+            PV1_STAT.write_volatile(PV_VSYNC);
+            PV1_INTEN.write_volatile(PV_VSYNC);
         }
+        this
     }
 
-    /// Moves the display to the currently off-screen half of the frame buffer
-    /// to show the latest frame.
-    pub fn vsync(&mut self)
+    /// Displays rings with a fixed radius and thickness centered at the
+    /// specified points on the screen.
+    pub fn draw_rings(&self, rings: &[u32x2])
     {
-        if self.count != 0 {
-            let mut msg = Message::new().unwrap();
-            let offset = Offset { x: 0,
-                                  y: if self.count & 0x1 == 0 { 0 } else { self.height as _ } };
-            msg.add_tag(OFFSET_TAG, offset).unwrap();
-            MBOX.exchange(msg).unwrap();
-        }
-        self.count += 1;
-    }
-
-    /// Draws circles with a fixed radius around the specified.
-    ///
-    /// * `points`: The points around which to draw the circles.
-    pub fn draw_circles(&mut self, points: &[TouchInfo])
-    {
-        // Draw to the off-screen frame buffer.
-        let base = if self.count & 1 == 0 {
-            unsafe { self.base.add(self.size / 4 / 2) }
+        let sqouter = u32x4::splat(50 * 50);
+        let sqinner = u32x4::splat(46 * 46);
+        let black = u32x4::splat(0xFF000000);
+        let white = u32x4::splat(0xFFFFFFFF);
+        let idxs = u32x4::from_array([0, 1, 2, 3]);
+        let count = self.count.load(Ordering::Relaxed);
+        let mut offset = if count & 1 == 0 {
+            self.width * self.height / 4
         } else {
-            self.base
+            0
         };
-        unsafe {
-            asm!(
-                // Find the squares of the radius of the inner and outer circles and store them in every lane of their respective vectors..
-                "mov {irad}.s[0], {rad:w}",
-                "mov {irad}.s[1], {irad}.s[0]",
-                "mov {irad}.d[1], {irad}.d[0]",
-                "mov {orad}.16b, {irad}.16b",
-                "mov {tmpl}.s[0], {thick:w}",
-                "mov {tmpl}.s[1], {tmpl}.s[0]",
-                "mov {tmpl}.d[1], {tmpl}.d[0]",
-                "add {orad}.4s, {orad}.4s, {tmpl}.4s",
-                "mul {irad}.4s, {irad}.4s, {irad}.4s",
-                "mul {orad}.4s, {orad}.4s, {orad}.4s",
-                // Create the template for the column offsets.
-                "mov {tmp:w}, #0",
-                "mov {tmpl}.s[0], {tmp:w}",
-                "mov {tmp:w}, #1",
-                "mov {tmpl}.s[1], {tmp:w}",
-                "mov {tmp:w}, #2",
-                "mov {tmpl}.s[2], {tmp:w}",
-                "mov {tmp:w}, #3",
-                "mov {tmpl}.s[3], {tmp:w}",
-                // Create a mask to set the alpha channel to opaque on every pixel.
-                "movi {alpha}.4s, #0xff, lsl 24",
-                // Loop over all the rows of the screen.
-                "mov {row:w}, #0",
-                "0:",
-                "cmp {row:w}, {end_row:w}",
-                "beq 0f",
-                // Copy the current row to every lane of a vector to allow computing distances later.
-                "mov {rows}.s[0], {row:w}",
-                "mov {rows}.s[1], {rows}.s[0]",
-                "mov {rows}.d[1], {rows}.d[0]",
-                // Loop over all the columns in each row.
-                "mov {col:w}, #0",
-                "1:",
-                "cmp {col:w}, {end_col:w}",
-                "beq 1f",
-                // Copy the current column to a vector and add the offset template.
-                "mov {cols}.s[0], {col:w}",
-                "mov {cols}.s[1], {cols}.s[0]",
-                "mov {cols}.d[1], {cols}.d[0]",
-                "add {cols}.4s,{cols}.4s, {tmpl}.4s",
-                // Loop over all the provided points.
-                "mov {point}, {start_point}",
-                "movi {pxs}.2d, #0x0",
-                "2:",
-                "cmp {point}, {end_point}",
-                "beq 2f",
-                // Load the point and find the distance to all the pixel coordinates in the vectors.
-                "ld2r {{v0.4s, v1.4s}}, [{point}], #0x8",
-                "sub v0.4s, v0.4s, {cols}.4s",
-                "sub v1.4s, v1.4s, {rows}.4s",
-                "mul {dist}.4s, v0.4s, v0.4s",
-                "mla {dist}.4s, v1.4s, v1.4s",
-                // Check whether the pixels are inside the outer or inner circles.
-                "cmhi v0.4s, {orad}.4s, {dist}.4s",
-                "cmhi v1.4s, {dist}.4s, {irad}.4s",
-                "and v0.16b, v0.16b, v1.16b",
-                // Draw the pixels without erasing previously drawn circles.
-                "orr {pxs}.16b, v0.16b, {pxs}.16b",
-                "b 2b",
-                "2:",
-                // Make the pixels opaque and draw them in the frame buffer.
-                "orr {pxs}.16b, {pxs}.16b, {alpha}.16b",
-                "str {pxs:q}, [{base}], #0x10",
-                "add {col:w}, {col:w}, #4",
-                "b 1b",
-                "1:",
-                "add {row:w}, {row:w}, #1",
-                "b 0b",
-                "0:",
-                base = inout (reg) base => _,
-                start_point = in (reg) points.as_ptr(),
-                end_point = in (reg) points.as_ptr().add(points.len()),
-                point = out (reg) _,
-                end_col = in (reg) self.width,
-                col = out (reg) _,
-                cols = out (vreg) _,
-                end_row = in (reg) self.height,
-                row = out (reg) _,
-                rows = out (vreg) _,
-                tmp = out (reg) _,
-                tmpl = out (vreg) _,
-                rad = in (reg) 50i32,
-                irad = out (vreg) _,
-                orad = out (vreg) _,
-                thick = in (reg) 4,
-                dist = out (vreg) _,
-                alpha = out (vreg) _,
-                pxs = out (vreg) _,
-                out ("v0") _,
-                out ("v1") _,
-                options (nostack)
-            );
+        let base = self.base.lock();
+        for row in 0 .. self.height {
+            let row = u32x4::splat(row as _);
+            for col in (0 .. self.width).step_by(4) {
+                let col = u32x4::splat(col as _) + idxs;
+                let mut mask = mask32x4::splat(false);
+                for ring in rings {
+                    let x = u32x4::splat(ring[0]);
+                    let y = u32x4::splat(ring[1]);
+                    let sqdistx = x - col;
+                    let sqdisty = y - row;
+                    let sqdist = sqdistx * sqdistx + sqdisty * sqdisty;
+                    mask |= sqdist.simd_ge(sqinner) & sqdist.simd_lt(sqouter);
+                }
+                let color = mask.select(white, black);
+                unsafe { base.add(offset).write(color) };
+                offset += 1;
+            }
         }
         fence(Ordering::Release);
+    }
+
+    /// Flips the frame buffers.
+    fn vsync()
+    {
+        let count = VIDEO.count.fetch_add(1, Ordering::Relaxed);
+        if count != 0 {
+            let mut req = Request::new();
+            req.push(RequestProperty::SetPosition { x: 0,
+                                                    y: VIDEO.height * (count & 1) as usize });
+            MBOX.exchange(req);
+        }
+        unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
     }
 }
