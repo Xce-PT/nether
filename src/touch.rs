@@ -9,7 +9,7 @@ use core::mem::MaybeUninit;
 use core::simd::u32x2;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::alloc::{Engine as AllocatorEngine, DMA};
+use crate::alloc::{Shell as Allocator, DMA};
 use crate::mbox::{Request, RequestProperty, MBOX};
 use crate::sync::{Lazy, Lock};
 
@@ -27,7 +27,7 @@ pub static TOUCH: Lazy<Lock<Touch>> = Lazy::new(Touch::new);
 pub struct Touch
 {
     /// Touchscreen buffer.
-    state: Box<State, AllocatorEngine<'static>>,
+    state: Box<State, Allocator<'static>>,
     /// Cached touch point information.
     cache: Cache,
 }

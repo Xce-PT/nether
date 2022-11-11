@@ -5,9 +5,6 @@
 //!
 //! [`Advisor`] is a spin-lock advisor that offers no type-safe guarantees but
 //! is useful to implement other types that do such as [`Lock`].
-//!
-//! Recursive locking is supported, so locking on the same logical CPU more than
-//! once won't cause a deadlock.
 
 #[cfg(not(test))]
 use core::arch::asm;
@@ -15,6 +12,8 @@ use core::cell::UnsafeCell;
 #[cfg(not(test))]
 use core::hint::spin_loop;
 use core::ops::{Deref, DerefMut};
+#[cfg(test)]
+use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -44,14 +43,15 @@ pub struct Advisor
 {
     /// The Logical CPU that currently holds the lock.
     affinity: AtomicUsize,
-    /// Recursion depth.
-    count: AtomicUsize,
 }
 
 /// Dummy lock advisor implementation for tests.
 #[cfg(test)]
 #[derive(Debug)]
-pub struct Advisor;
+pub struct Advisor
+{
+    is_locked: AtomicBool,
+}
 
 impl<'a, T> Guard<'a, T>
 {
@@ -125,8 +125,7 @@ impl Advisor
     /// Returns the newly created lock advisor.
     pub const fn new() -> Self
     {
-        Self { affinity: AtomicUsize::new(0x0),
-               count: AtomicUsize::new(0) }
+        Self { affinity: AtomicUsize::new(0x0) }
     }
 
     /// Places a hold on the lock, blocking the logical CPU if another logical
@@ -139,17 +138,13 @@ impl Advisor
         // always set, which allows using 0x0 as a special value.
         let affinity: usize;
         asm!("mrs {aff}, mpidr_el1", aff = out (reg) affinity, options (nomem, nostack, preserves_flags));
-        if self.affinity.load(Ordering::Relaxed) == affinity {
-            self.count.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
+        assert_ne!(self.affinity.load(Ordering::Relaxed), affinity, "Deadlock detected");
         while self.affinity
                   .compare_exchange_weak(0x0, affinity, Ordering::SeqCst, Ordering::Relaxed)
                   .is_err()
         {
             spin_loop()
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Relinquishes the hold on a lock, unblocking another logical CPU that
@@ -165,10 +160,7 @@ impl Advisor
         asm!("mrs {aff}, mpidr_el1", aff = out (reg) affinity, options (nomem, nostack, preserves_flags));
         assert_eq!(affinity,
                    self.affinity.load(Ordering::Relaxed),
-                   "Attempted to relinquish a lock that is not held by this core");
-        if self.count.fetch_sub(1, Ordering::Relaxed) > 1 {
-            return;
-        }
+                   "Attempted to relinquish a lock that is not held by this logical CPU");
         self.affinity.store(0x0, Ordering::SeqCst);
     }
 }
@@ -178,12 +170,22 @@ impl Advisor
 {
     pub const fn new() -> Self
     {
-        Self
+        Self { is_locked: AtomicBool::new(false) }
     }
 
-    pub unsafe fn lock(&self) {}
+    pub unsafe fn lock(&self)
+    {
+        assert!(!self.is_locked.load(Ordering::Relaxed), "Potential deadlock detected");
+        self.is_locked.store(true, Ordering::Relaxed);
+    }
 
-    pub unsafe fn unlock(&self) {}
+    pub unsafe fn unlock(&self)
+    {
+        assert!(self.is_locked.load(Ordering::Relaxed),
+                "Attempted to relinquish the hold on a lock that is not held");
+        self.is_locked.store(false, Ordering::Relaxed);
+    }
 }
 
+#[cfg(not(test))]
 unsafe impl<T> Sync for Lock<T> {}

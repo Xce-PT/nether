@@ -6,41 +6,41 @@ use core::ops::Range;
 use core::ptr::{null_mut, NonNull};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 
-use crate::sync::{Lock, LockGuard};
+use crate::sync::Lock;
 #[cfg(not(test))]
 use crate::{DMA_RANGE, HEAP_RANGE};
 
 /// Heap allocator instance.
 #[cfg(not(test))]
 #[global_allocator]
-pub static HEAP: Engine = Engine::new(&HEAP_STATE);
+pub static HEAP: Shell = Shell::new(&HEAP_CORE);
 /// DMA allocator instance.
 #[cfg(not(test))]
-pub static DMA: Engine = Engine::new(&DMA_STATE);
+pub static DMA: Shell = Shell::new(&DMA_CORE);
 
-/// Heap allocator state.
+/// Heap allocator core.
 #[cfg(not(test))]
-static HEAP_STATE: State = unsafe { State::new(HEAP_RANGE) };
-/// DMA allocator state.
+static HEAP_CORE: Lock<Core> = unsafe { Core::new(HEAP_RANGE) };
+/// DMA allocator core.
 #[cfg(not(test))]
-static DMA_STATE: State = unsafe { State::new(DMA_RANGE) };
+static DMA_CORE: Lock<Core> = unsafe { Core::new(DMA_RANGE) };
 
-/// Free list allocator engine.
+/// Free list allocator front-end.
 #[derive(Clone, Copy, Debug)]
-pub struct Engine<'a>
+pub struct Shell<'a>
 {
-    /// Shared state of all copies of this allocator.
-    state: &'a State,
+    /// Shared core of all copies of this allocator.
+    core: &'a Lock<Core>,
 }
 
-/// Shared allocator state.
+/// Shared allocator core.
 #[derive(Debug)]
-struct State
+struct Core
 {
-    /// Range covered by all alocator instances sharing this state.
+    /// Initial free range.
     range: Range<usize>,
     /// Head of the list of free fragments.
-    head: Lock<Fragment>,
+    head: Option<*mut Fragment>,
 }
 
 /// Free memory fragment.
@@ -53,28 +53,111 @@ struct Fragment
     next: *mut Fragment,
 }
 
-impl<'a> Engine<'a>
+impl<'a> Shell<'a>
 {
-    /// Creates and initializes a new allocator core.
+    /// Creates and initializes a new allocator shell.
     ///
-    /// * `state`: Shared state of all instances of this allocator.
+    /// * `core`: Shared core of all instances of this allocator.
     ///
-    /// Returns the created allocator.
-    const fn new(state: &'a State) -> Self
+    /// Returns the created allocator shell.
+    const fn new(core: &'a Lock<Core>) -> Self
     {
-        Self { state }
+        Self { core }
     }
 }
 
-unsafe impl<'a> Allocator for Engine<'a>
+unsafe impl<'a> GlobalAlloc for Shell<'a>
+{
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8
+    {
+        self.core
+            .lock()
+            .allocate(layout)
+            .map(|base| base.as_mut_ptr().cast::<u8>())
+            .unwrap_or(null_mut())
+    }
+
+    unsafe fn dealloc(&self, base: *mut u8, layout: Layout)
+    {
+        self.core.lock().deallocate(NonNull::new_unchecked(base), layout);
+    }
+
+    unsafe fn realloc(&self, base: *mut u8, layout: Layout, new_size: usize) -> *mut u8
+    {
+        let new_layout = Layout::from_size_align(new_size, layout.align()).unwrap();
+        if new_size >= layout.size() {
+            return self.core
+                       .lock()
+                       .grow(NonNull::new_unchecked(base), layout, new_layout)
+                       .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
+                       .unwrap_or(null_mut());
+        }
+        self.core
+            .lock()
+            .shrink(NonNull::new_unchecked(base), layout, new_layout)
+            .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
+            .unwrap_or(null_mut())
+    }
+}
+
+unsafe impl<'a> Allocator for Shell<'a>
 {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>
     {
+        self.core.lock().allocate(layout)
+    }
+
+    unsafe fn deallocate(&self, base: NonNull<u8>, layout: Layout)
+    {
+        self.core.lock().deallocate(base, layout)
+    }
+
+    unsafe fn grow(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
+                   -> Result<NonNull<[u8]>, AllocError>
+    {
+        self.core.lock().grow(base, old_layout, new_layout)
+    }
+
+    unsafe fn shrink(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
+                     -> Result<NonNull<[u8]>, AllocError>
+    {
+        self.core.lock().shrink(base, old_layout, new_layout)
+    }
+}
+
+impl Core
+{
+    /// Creates and initializes a new allocator shared core.
+    ///
+    /// * `range`: The memory range covered by all the shell allocator instances
+    ///   sharing this core.
+    ///
+    /// Returns the created core.
+    const unsafe fn new(range: Range<usize>) -> Lock<Self>
+    {
+        let this = Self { range, head: None };
+        Lock::new(this)
+    }
+
+    /// Attempts to allocate memory with the specified layout.
+    ///
+    /// * `layout`: Layout of the memory to allocate.
+    ///
+    /// Either returns the allocated memory or an error to signal an out of
+    /// memory condition.
+    fn allocate(&mut self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>
+    {
         let layout = Layout::from_size_align((layout.size() + 0xF) & !0xF, max(layout.align(), 16)).unwrap();
         unsafe {
-            let mut head = self.state.head();
+            let init = || {
+                let frag = self.range.start as *mut Fragment;
+                *frag = Fragment { next: null_mut(),
+                                   size: self.range.end - self.range.start };
+                frag
+            };
+            let head = self.head.get_or_insert_with(init);
             // Find the first fragment that can fit the new allocation.
-            let mut current = head.next;
+            let mut current = *head;
             let mut prev = null_mut();
             while !current.is_null() {
                 let start = current as usize;
@@ -102,9 +185,9 @@ unsafe impl<'a> Allocator for Engine<'a>
             (*current).size = base - start;
             if (*current).size == 0 {
                 if !prev.is_null() {
-                    (*prev).next = (*current).next
+                    (*prev).next = (*current).next;
                 } else {
-                    head.next = (*current).next
+                    *head = (*current).next;
                 }
             }
             let slice = slice_from_raw_parts(base as *mut u8, layout.size());
@@ -113,14 +196,20 @@ unsafe impl<'a> Allocator for Engine<'a>
         }
     }
 
-    unsafe fn deallocate(&self, base: NonNull<u8>, layout: Layout)
+    /// Deallocates the memory at base with the specified layout.
+    ///
+    /// * `base`: Base of the memory to deallocate.
+    /// * `layout`: Layout of the allocated memory.
+    unsafe fn deallocate(&mut self, base: NonNull<u8>, layout: Layout)
     {
         let base = base.addr().get();
         let layout = Layout::from_size_align((layout.size() + 0xF) & !0xF, max(layout.align(), 16)).unwrap();
         let top = base + layout.size();
-        let mut head = self.state.head.lock();
+        let head = self.head
+                       .as_mut()
+                       .expect("Attempted to deallocate using an uninitialized allocator");
         // Find the next and previous blocks.
-        let mut next = head.next;
+        let mut next = *head;
         let mut prev = null_mut();
         while !next.is_null() && (next as usize) < base {
             prev = next;
@@ -144,11 +233,20 @@ unsafe impl<'a> Allocator for Engine<'a>
                 (*prev).next = current;
             }
         } else {
-            head.next = current;
+            *head = current;
         }
     }
 
-    unsafe fn grow(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
+    /// Attempts to grow the block of memory at base with the specified layout
+    /// to a new layout.
+    ///
+    /// * `base`: Base of the memory block to grow.
+    /// * `old_layout`: Old layout to grow from.
+    /// * `new_layout`: New layout to grow to.
+    ///
+    /// Either returns the new base or an error to signal an out of memory
+    /// condition or an unsupported request.
+    unsafe fn grow(&mut self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
                    -> Result<NonNull<[u8]>, AllocError>
     {
         let base = base.addr().get();
@@ -164,9 +262,11 @@ unsafe impl<'a> Allocator for Engine<'a>
             let slice = NonNull::from(slice);
             return Ok(slice);
         }
-        let mut head = self.state.head.lock();
+        let head = self.head
+                       .as_mut()
+                       .expect("Attempted to reallocate using an uninitialized allocator");
         // Find the previous and next free fragments.
-        let mut next = head.next;
+        let mut next = *head;
         let mut prev = null_mut();
         while !next.is_null() {
             if next as usize > base {
@@ -190,7 +290,7 @@ unsafe impl<'a> Allocator for Engine<'a>
                 if !prev.is_null() {
                     (*prev).next = next
                 } else {
-                    head.next = next
+                    *head = next
                 }
                 let slice = slice_from_raw_parts(base as *mut u8, new_layout.size());
                 let slice = NonNull::from(slice);
@@ -202,7 +302,7 @@ unsafe impl<'a> Allocator for Engine<'a>
                 if !prev.is_null() {
                     (*prev).next = (*next).next
                 } else {
-                    head.next = (*next).next
+                    *head = (*next).next
                 }
                 let slice = slice_from_raw_parts(base as *mut u8, new_layout.size());
                 let slice = NonNull::from(slice);
@@ -235,7 +335,16 @@ unsafe impl<'a> Allocator for Engine<'a>
         Ok(slice)
     }
 
-    unsafe fn shrink(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
+    /// Attempts to shrink the block of memory at base from the specified old
+    /// layout to a new layout.
+    ///
+    /// * `base`: Base of the memory block to shrink.
+    /// * `old_layout`: Layout to shrink from.
+    /// * `new_layout`: Layout to shrink to.
+    ///
+    /// Either returns the new base or an error to signal an out of memory
+    /// condition or an unsupported operation.
+    unsafe fn shrink(&mut self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
                      -> Result<NonNull<[u8]>, AllocError>
     {
         let base = base.addr().get();
@@ -246,9 +355,11 @@ unsafe impl<'a> Allocator for Engine<'a>
         if new_layout.size() >= old_layout.size() {
             return Err(AllocError);
         }
-        let head = self.state.head.lock();
+        let head = self.head
+                       .as_mut()
+                       .expect("Attempted to reallocate using an uninitialized allocator");
         // Find the previous and next free fragments.
-        let mut next = head.next;
+        let mut next = *head;
         let mut prev = null_mut();
         while !next.is_null() {
             if next as usize > base {
@@ -292,68 +403,6 @@ unsafe impl<'a> Allocator for Engine<'a>
         let slice = slice_from_raw_parts(new_base as *mut u8, new_layout.size());
         let slice = NonNull::from(slice);
         Ok(slice)
-    }
-}
-
-unsafe impl<'a> GlobalAlloc for Engine<'a>
-{
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8
-    {
-        self.allocate(layout)
-            .map(|base| base.as_mut_ptr().cast::<u8>())
-            .unwrap_or(null_mut())
-    }
-
-    unsafe fn dealloc(&self, base: *mut u8, layout: Layout)
-    {
-        self.deallocate(NonNull::new_unchecked(base), layout);
-    }
-
-    unsafe fn realloc(&self, base: *mut u8, layout: Layout, new_size: usize) -> *mut u8
-    {
-        let new_layout = Layout::from_size_align(new_size, layout.align()).unwrap();
-        if new_size >= layout.size() {
-            return self.grow(NonNull::new_unchecked(base), layout, new_layout)
-                       .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
-                       .unwrap_or(null_mut());
-        }
-        self.shrink(NonNull::new_unchecked(base), layout, new_layout)
-            .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
-            .unwrap_or(null_mut())
-    }
-}
-
-impl State
-{
-    /// Creates and initializes a new allocator shared state.
-    ///
-    /// * `range`: The memory range covered by all the core allocator instances
-    ///   sharing this state.
-    ///
-    /// Returns the created state.
-    const unsafe fn new(range: Range<usize>) -> Self
-    {
-        Self { range,
-               head: Lock::new(Fragment { size: 0,
-                                          next: null_mut() }) }
-    }
-
-    /// Initializes the allocator's state if necessary,
-    ///
-    /// Returns a locked head to the initialized state.
-    fn head(&self) -> LockGuard<Fragment>
-    {
-        let mut head = self.head.lock();
-        if head.size == 0 {
-            let fragment = self.range.start as *mut Fragment;
-            let size = self.range.end - self.range.start;
-            unsafe {
-                *fragment = Fragment { size: self.range.end - self.range.start,
-                                       next: null_mut() }
-            };
-            *head = Fragment { size, next: fragment };
-        }
-        head
     }
 }
 
@@ -406,13 +455,12 @@ mod tests
             Self { buf: [0xFF; 0x1000] }
         }
 
-        fn provide(&mut self, state: &State, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
+        fn provide(&mut self, core: &Lock<Core>, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
         {
             let mut offset = 0usize;
             let mut prev = null_mut::<Fragment>();
             let buf = self.buf.as_mut_ptr();
-            *state.head.lock() = Fragment { size: 0x1000,
-                                            next: null_mut() };
+            core.lock().head = Some(null_mut());
             for frag in frags {
                 let frag = frag.start .. frag.end;
                 if frag.start >= frag.end {
@@ -432,10 +480,10 @@ mod tests
                     *current = Fragment { size: frag.end - frag.start,
                                           next: null_mut() };
                     if !prev.is_null() {
-                        (*prev).next = current
+                        (*prev).next = current;
                     } else {
-                        state.head.lock().next = current
-                    };
+                        core.lock().head = Some(current);
+                    }
                     offset += frag.end - frag.start;
                     prev = current;
                 }
@@ -443,10 +491,10 @@ mod tests
             Ok(())
         }
 
-        fn validate(&self, state: &State, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
+        fn validate(&self, core: &Lock<Core>, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
         {
             let mut offset = 0usize;
-            let mut current = state.head.lock().next;
+            let mut current = *core.lock().head.as_ref().unwrap();
             let buf = self.buf.as_ptr();
             for frag in frags {
                 let frag = frag.start .. frag.end;
@@ -650,11 +698,11 @@ mod tests
     fn test_alloc(layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let state = unsafe { State::new(buf.range()) };
-        let alloc = Engine::new(&state);
-        buf.provide(&state, input).map_err(TestError::Input)?;
+        let core = unsafe { Core::new(buf.range()) };
+        let alloc = Shell::new(&core);
+        buf.provide(&core, input).map_err(TestError::Input)?;
         let base = unsafe { alloc.alloc(layout) as usize };
-        buf.validate(&state, output).map_err(TestError::Output)?;
+        buf.validate(&core, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }
@@ -666,12 +714,12 @@ mod tests
                     -> Result<(), TestError>
     {
         let mut buf = Buffer::new();
-        let state = unsafe { State::new(buf.range()) };
-        let alloc = Engine::new(&state);
-        buf.provide(&state, input).map_err(TestError::Input)?;
+        let core = unsafe { Core::new(buf.range()) };
+        let alloc = Shell::new(&core);
+        buf.provide(&core, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
         unsafe { alloc.dealloc(base as _, layout) };
-        buf.validate(&state, output).map_err(TestError::Output)?;
+        buf.validate(&core, output).map_err(TestError::Output)?;
         Ok(())
     }
 
@@ -679,16 +727,16 @@ mod tests
                     -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let state = unsafe { State::new(buf.range()) };
-        let alloc = Engine::new(&state);
-        buf.provide(&state, input).map_err(TestError::Input)?;
+        let core = unsafe { Core::new(buf.range()) };
+        let alloc = Shell::new(&core);
+        buf.provide(&core, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
         let size = min(layout.size(), new_size);
         for offset in 0 .. size / 2 {
             unsafe { (base as *mut u16).add(offset).write(offset as _) }
         }
         let base = unsafe { alloc.realloc(base as _, layout, new_size) as usize };
-        buf.validate(&state, output).map_err(TestError::Output)?;
+        buf.validate(&core, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }
