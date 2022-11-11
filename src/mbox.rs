@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use core::hint::spin_loop;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::alloc::{Engine as AllocatorEngine, DMA};
+use crate::alloc::{Shell as Allocator, DMA};
 use crate::sync::{Lazy, Lock};
 use crate::{DMA_RANGE, PERRY_RANGE, VC_RANGE};
 
@@ -61,7 +61,7 @@ pub static MBOX: Lazy<Mailbox> = Lazy::new(Mailbox::new);
 pub struct Mailbox
 {
     /// DMA buffer.
-    buf: Lock<Box<Buffer, AllocatorEngine<'static>>>,
+    buf: Lock<Box<Buffer, Allocator<'static>>>,
 }
 
 /// Request to send to the video core.

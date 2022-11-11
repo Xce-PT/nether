@@ -6,4 +6,4 @@ mod lock;
 
 #[cfg(not(test))]
 pub use self::lazy::Lazy;
-pub use self::lock::{Advisor as LockAdvisor, Guard as LockGuard, Lock};
+pub use self::lock::{Guard as LockGuard, Lock};
