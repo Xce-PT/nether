@@ -82,8 +82,9 @@ pub extern "C" fn start() -> !
 fn tick()
 {
     IRQ.handle();
-    let touchpoints = TOUCH.lock().poll();
-    VIDEO.draw_rings(touchpoints.as_slice());
+    let mut touch = TOUCH.lock();
+    let points = touch.poll();
+    VIDEO.draw_rings(points);
 }
 
 /// Panics with diagnostic information about a fault.

@@ -28,18 +28,9 @@ pub struct Touch
 {
     /// Touchscreen buffer.
     state: Box<State, Allocator<'static>>,
-    /// Cached touch point information.
-    cache: Cache,
-}
-
-/// Touch point information.
-#[derive(Clone, Copy, Debug)]
-#[repr(C)]
-pub struct Cache
-{
-    /// Touch point count.
+    /// Cached touch point count.
     len: usize,
-    /// List of touch points.
+    /// List of cached touch points.
     points: [u32x2; MAX_POINTS],
 }
 
@@ -93,7 +84,8 @@ impl Touch
         req.push(RequestProperty::SetTouchBuffer { buf: state.as_mut() as *mut State as _ });
         MBOX.exchange(req);
         let this = Self { state,
-                          cache: Cache::new() };
+                          len: 0,
+                          points: [u32x2::from_array([0; 2]); MAX_POINTS] };
         Lock::new(this)
     }
 
@@ -101,42 +93,21 @@ impl Touch
     /// filling the cache if new data is found.
     ///
     /// Returns the cached information.
-    pub fn poll(&mut self) -> Cache
+    pub fn poll(&mut self) -> &[u32x2]
     {
         fence(Ordering::Acquire);
         let state = *self.state;
         if state.points_len == INVALID_POINTS {
-            return self.cache;
+            return &self.points[0 .. self.len];
         }
         self.state.points_len = INVALID_POINTS;
         fence(Ordering::Release);
-        if state.points_len == 0 {
-            self.cache.len = 0;
-            return self.cache;
-        }
         for idx in 0 .. state.points_len as usize {
             let x = state.points[idx].x_lsb as i32 | (state.points[idx].x_msb as i32 & 0x3) << 8;
             let y = state.points[idx].y_lsb as i32 | (state.points[idx].y_msb as i32 & 0x3) << 8;
-            self.cache.points[idx] = u32x2::from_array([x as _, y as _]);
+            self.points[idx] = u32x2::from_array([x as _, y as _]);
         }
-        self.cache.len = state.points_len as _;
-        self.cache
-    }
-}
-
-impl Cache
-{
-    /// Creates and initializes a new cache container.
-    ///
-    /// Returns the created cache container.
-    fn new() -> Self
-    {
-        Self { len: 0,
-               points: [u32x2::from_array([0 as _, 0 as _]); MAX_POINTS] }
-    }
-
-    pub fn as_slice(&self) -> &[u32x2]
-    {
+        self.len = state.points_len as _;
         &self.points[0 .. self.len]
     }
 }
