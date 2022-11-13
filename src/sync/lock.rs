@@ -1,21 +1,17 @@
 //! Locking primitives.
-//!
-//! [`Lock`] is a type-safe lock implementation that remains locked for as long
-//! as its returned [`Guard`] lives.
-//!
-//! [`Advisor`] is a spin-lock advisor that offers no type-safe guarantees but
-//! is useful to implement other types that do such as [`Lock`].
 
-#[cfg(not(test))]
-use core::arch::asm;
 use core::cell::UnsafeCell;
 #[cfg(not(test))]
 use core::hint::spin_loop;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 #[cfg(test)]
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(test))]
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(not(test))]
+use crate::{cpu_id, CPU_COUNT};
 
 /// Lock guard whose lifetime determines how long the lock is held.
 #[derive(Debug)]
@@ -23,6 +19,8 @@ pub struct Guard<'a, T>
 {
     /// Lock to be released once this guard is dropped.
     lock: &'a Lock<T>,
+    /// Zero-sized field to remove the Send trait.
+    _data: PhantomData<*mut ()>,
 }
 
 /// Lock container.
@@ -62,7 +60,8 @@ impl<'a, T> Guard<'a, T>
     /// Returns the newly created guard.
     fn new(lock: &'a Lock<T>) -> Self
     {
-        Self { lock }
+        Self { lock,
+               _data: PhantomData }
     }
 }
 
@@ -125,7 +124,7 @@ impl Advisor
     /// Returns the newly created lock advisor.
     pub const fn new() -> Self
     {
-        Self { affinity: AtomicUsize::new(0x0) }
+        Self { affinity: AtomicUsize::new(CPU_COUNT) }
     }
 
     /// Places a hold on the lock, blocking the logical CPU if another logical
@@ -134,13 +133,10 @@ impl Advisor
     /// The caller must ensure that this is called before a critical section.
     pub unsafe fn lock(&self)
     {
-        // Affinity encoding takes advantage of the fact that bit 31 of MPIDR_EL1 is
-        // always set, which allows using 0x0 as a special value.
-        let affinity: usize;
-        asm!("mrs {aff}, mpidr_el1", aff = out (reg) affinity, options (nomem, nostack, preserves_flags));
+        let affinity = cpu_id();
         assert_ne!(self.affinity.load(Ordering::Relaxed), affinity, "Deadlock detected");
         while self.affinity
-                  .compare_exchange_weak(0x0, affinity, Ordering::SeqCst, Ordering::Relaxed)
+                  .compare_exchange_weak(CPU_COUNT, affinity, Ordering::SeqCst, Ordering::Relaxed)
                   .is_err()
         {
             spin_loop()
@@ -150,18 +146,17 @@ impl Advisor
     /// Relinquishes the hold on a lock, unblocking another logical CPU that
     /// intends to hold it.
     ///
-    /// Panics if the lock is not held by this core.
+    /// Panics if the lock is not held by this logical CPU.
     ///
-    /// The caller must ensure to call this after being done with a critical
+    /// The caller must make sure to call this after being done with a critical
     /// section.
     pub unsafe fn unlock(&self)
     {
-        let affinity: usize;
-        asm!("mrs {aff}, mpidr_el1", aff = out (reg) affinity, options (nomem, nostack, preserves_flags));
+        let affinity = cpu_id();
         assert_eq!(affinity,
                    self.affinity.load(Ordering::Relaxed),
                    "Attempted to relinquish a lock that is not held by this logical CPU");
-        self.affinity.store(0x0, Ordering::SeqCst);
+        self.affinity.store(CPU_COUNT, Ordering::SeqCst);
     }
 }
 
@@ -187,5 +182,6 @@ impl Advisor
     }
 }
 
-#[cfg(not(test))]
+unsafe impl<T> Send for Lock<T> {}
+
 unsafe impl<T> Sync for Lock<T> {}

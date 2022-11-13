@@ -8,10 +8,16 @@
 //! tag is being used to move the display to the top of the frame buffer every
 //! even frame and to the bottom of the frame buffer every odd frame.
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+use core::future::Future;
 use core::mem::align_of;
+use core::pin::Pin;
 use core::ptr::null_mut;
 use core::simd::{mask32x4, u32x2, u32x4, SimdPartialOrd};
 use core::sync::atomic::{fence, AtomicU64, Ordering};
+use core::task::{Context, Poll, Waker};
 
 use crate::irq::IRQ;
 use crate::mbox::{Request, RequestProperty, ResponseProperty, MBOX};
@@ -46,6 +52,23 @@ pub struct Video
     height: usize,
     /// Frame counter.
     count: AtomicU64,
+    /// VSync waiters.
+    waiters: Lock<Vec<Waker>>,
+    /// Command queue.
+    queue: Lock<Queue>,
+}
+
+pub struct VerticalSync
+{
+    /// ID of the current frame when this future was created.
+    count: u64,
+}
+
+/// Command queue.
+#[derive(Debug)]
+struct Queue
+{
+    rings: Vec<u32x2>,
 }
 
 impl Video
@@ -63,11 +86,14 @@ impl Video
         req.push(RequestProperty::SetDepth { bits: 32 });
         req.push(RequestProperty::Allocate { align: align_of::<u32x4>() });
         let resp = MBOX.exchange(req);
+        let queue = Queue { rings: Vec::new() };
         let mut this = Self { base: Lock::new(null_mut()),
                               size: 0,
                               width: 0,
                               height: 0,
-                              count: AtomicU64::new(0) };
+                              count: AtomicU64::new(0),
+                              waiters: Lock::new(Vec::new()),
+                              queue: Lock::new(queue) };
         for prop in resp {
             match prop {
                 ResponseProperty::Allocate { base, size } => {
@@ -93,6 +119,18 @@ impl Video
     /// specified points on the screen.
     pub fn draw_rings(&self, rings: &[u32x2])
     {
+        let mut queue = self.queue.lock();
+        queue.rings.extend_from_slice(rings);
+    }
+
+    /// Commits all the commands added to the queue, drawing them to the
+    /// off-screen buffer.
+    ///
+    /// Returns a future that, when awaited, blocks the task until the next
+    /// vertical synchronization event.
+    pub fn commit(&self) -> VerticalSync
+    {
+        let mut queue = self.queue.lock();
         let sqouter = u32x4::splat(50 * 50);
         let sqinner = u32x4::splat(46 * 46);
         let black = u32x4::splat(0xFF000000);
@@ -110,7 +148,7 @@ impl Video
             for col in (0 .. self.width).step_by(4) {
                 let col = u32x4::splat(col as _) + idxs;
                 let mut mask = mask32x4::splat(false);
-                for ring in rings {
+                for ring in queue.rings.iter() {
                     let x = u32x4::splat(ring[0]);
                     let y = u32x4::splat(ring[1]);
                     let sqdistx = x - col;
@@ -124,6 +162,8 @@ impl Video
             }
         }
         fence(Ordering::Release);
+        queue.rings.clear();
+        VerticalSync::new(self.count.load(Ordering::Relaxed))
     }
 
     /// Flips the frame buffers.
@@ -136,6 +176,32 @@ impl Video
                                                     y: VIDEO.height * (count & 1) as usize });
             MBOX.exchange(req);
         }
+        let mut waiters = VIDEO.waiters.lock();
+        waiters.iter().for_each(|waker| waker.wake_by_ref());
+        waiters.clear();
         unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
+    }
+}
+
+impl VerticalSync
+{
+    fn new(count: u64) -> Self
+    {
+        Self { count }
+    }
+}
+
+impl Future for VerticalSync
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output>
+    {
+        let count = VIDEO.count.load(Ordering::Relaxed);
+        if count != self.count {
+            return Poll::Ready(());
+        }
+        VIDEO.waiters.lock().push(ctx.waker().clone());
+        Poll::Pending
     }
 }

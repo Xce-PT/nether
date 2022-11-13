@@ -9,7 +9,6 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use core::ptr::write_volatile;
 
@@ -32,6 +31,8 @@ const GICD_IPRIORITYR: *mut [u8; IRQ_COUNT] = (GIC_BASE + 0x1400) as _;
 const GICD_ITARGETSR: *mut [u8; IRQ_COUNT] = (GIC_BASE + 0x1800) as _;
 /// IRQ trigger configuration registers.
 const GICD_ICFGR: *mut [u32; IRQ_COUNT >> 4 /* Two bits per field */] = (GIC_BASE + 0x1c00) as _;
+/// Software Generated IRQ register.
+const GICD_SGIR: *mut u32 = (GIC_BASE + 0x1F00) as _;
 /// IRQ minimum priority register.
 const GICC_PMR: *mut u32 = (GIC_BASE + 0x2004) as _;
 /// IRQ acknowledge register.
@@ -46,7 +47,7 @@ pub static IRQ: Lazy<Irq> = Lazy::new(Irq::new);
 pub struct Irq
 {
     /// Registered handlers.
-    handlers: Lock<BTreeMap<u32, Box<dyn Fn() + Send + 'static>>>,
+    handlers: Lock<BTreeMap<u32, fn()>>,
 }
 
 impl Irq
@@ -67,14 +68,13 @@ impl Irq
             // them.
             (*GICD_IPRIORITYR).iter_mut()
                               .for_each(|element| write_volatile(element, 0x7F));
-            // Make all SPIs level triggered.
+            // Make all IRQs level triggered.
             (*GICD_ICFGR).iter_mut()
-                         .skip(1)
-                         .for_each(|element| write_volatile(element, 55555555));
-            // Deliver all SPIs to all cores..
+                         .for_each(|element| write_volatile(element, 0x55555555));
+            // Deliver all SPIs to all cores.
             (*GICD_ITARGETSR).iter_mut()
-                             .skip(8)
-                             .for_each(|element| write_volatile(element, 0xF));
+                             .skip(32)
+                             .for_each(|element| write_volatile(element, 0xFF));
         }
         Self { handlers: Lock::new(BTreeMap::new()) }
     }
@@ -83,7 +83,7 @@ impl Irq
     ///
     /// * `irq`: IRQ to wait for.
     /// * `handler`: Handler function to register.
-    pub fn register(&self, irq: u32, handler: impl Fn() + Send + 'static)
+    pub fn register(&self, irq: u32, handler: fn())
     {
         assert!((irq as usize) < IRQ_COUNT, "IRQ #{irq} is out of range");
         let mut handlers = self.handlers.lock();
@@ -92,13 +92,25 @@ impl Irq
         let val = 0x1 << (irq & 0x1F);
         let idx = irq as usize >> 5;
         unsafe { write_volatile((*GICD_ISENABLER).get_mut(idx).unwrap(), val) };
-        let handler = Box::new(handler);
         handlers.insert(irq, handler);
+    }
+
+    /// Raises the specified Software Generated Interrupt on all cores except
+    /// the caller.
+    ///
+    /// * `irq`: IRQ to raise.
+    pub fn trigger(&self, irq: u32)
+    {
+        assert!(irq < 16,
+                "Attempted to trigger a Software Generated Interrupt outside of the valid range");
+        let val = 0x1008000 | irq; // Target all cores except the one making this call.
+        unsafe { GICD_SGIR.write_volatile(val) };
     }
 
     /// Checks for and processes all pending IRQs.
     ///
-    /// This function is intended to be called once every main loop.
+    /// This function is intended to be called once every main loop on every
+    /// core.
     pub fn handle(&self)
     {
         loop {
@@ -107,10 +119,11 @@ impl Irq
             if irq as usize >= IRQ_COUNT {
                 break;
             }
-            self.handlers
-                .lock()
-                .get(&irq)
-                .expect("Received an IRQ without a handler")();
+            let handler = *self.handlers
+                               .lock()
+                               .get(&irq)
+                               .expect("Received an IRQ without a handler");
+            handler();
             unsafe { GICC_EOIR.write_volatile(val as _) };
         }
     }

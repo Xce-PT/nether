@@ -17,6 +17,8 @@ mod alloc;
 mod irq;
 #[cfg(not(test))]
 mod mbox;
+#[cfg(not(test))]
+mod sched;
 mod sync;
 #[cfg(not(test))]
 mod touch;
@@ -35,6 +37,9 @@ use core::ops::Range;
 use core::panic::PanicInfo;
 #[cfg(not(test))]
 use core::write;
+
+#[cfg(not(test))]
+use sched::SCHED;
 
 #[cfg(not(test))]
 use self::irq::IRQ;
@@ -57,6 +62,12 @@ const PERRY_RANGE: Range<usize> = 0x80000000 .. 0x84000000;
 /// Video core reserved range.
 #[cfg(not(test))]
 const VC_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
+/// CLogical CPU count.
+#[cfg(not(test))]
+const CPU_COUNT: usize = 4;
+/// Software generated IRQ that halts the system.
+#[cfg(not(test))]
+const HALT_IRQ: u32 = 0;
 
 #[cfg(not(test))]
 global_asm!(include_str!("boot.s"));
@@ -68,23 +79,24 @@ pub extern "C" fn start() -> !
 {
     let affinity = cpu_id();
     debug!("Booted core #{affinity}");
-    if affinity != 0 {
-        halt();
+    if affinity == 0 {
+        IRQ.register(HALT_IRQ, || {
+               halt();
+           });
+        SCHED.spawn(ticker());
     }
-    loop {
-        tick();
-        sleep();
-    }
+    SCHED.start()
 }
 
-/// Actions to perform each tick.
+/// Actions to perform in an infinite loop.
 #[cfg(not(test))]
-fn tick()
+async fn ticker()
 {
-    IRQ.handle();
-    let mut touch = TOUCH.lock();
-    let points = touch.poll();
-    VIDEO.draw_rings(points);
+    loop {
+        let points = TOUCH.poll();
+        VIDEO.draw_rings(points.as_slice());
+        VIDEO.commit().await;
+    }
 }
 
 /// Panics with diagnostic information about a fault.
@@ -169,6 +181,7 @@ fn panic(info: &PanicInfo) -> !
     }
     uart.write_char('\n').unwrap();
     drop(uart);
+    IRQ.trigger(HALT_IRQ);
     halt();
 }
 
@@ -186,7 +199,7 @@ fn sleep()
 
 /// Returns the ID of the current CPU core.
 #[cfg(not(test))]
-pub fn cpu_id() -> usize
+fn cpu_id() -> usize
 {
     let id: usize;
     unsafe {

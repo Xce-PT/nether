@@ -11,7 +11,7 @@ use core::ops::Deref;
 use super::lock::Advisor as LockAdvisor;
 
 /// Lazy initializer for static values.
-pub struct Lazy<T: Sync + 'static>
+pub struct Lazy<T: Send + Sync + 'static>
 {
     /// Lock advisor to prevent simultaneous initialization.
     advisor: LockAdvisor,
@@ -21,7 +21,7 @@ pub struct Lazy<T: Sync + 'static>
     content: UnsafeCell<Option<T>>,
 }
 
-impl<T: Sync + 'static> Lazy<T>
+impl<T: Send + Sync + 'static> Lazy<T>
 {
     /// Creates and initializes a lazy initializer.
     ///
@@ -36,7 +36,7 @@ impl<T: Sync + 'static> Lazy<T>
     }
 }
 
-impl<T: Sync + 'static> Deref for Lazy<T>
+impl<T: Send + Sync + 'static> Deref for Lazy<T>
 {
     type Target = T;
 
@@ -49,4 +49,6 @@ impl<T: Sync + 'static> Deref for Lazy<T>
     }
 }
 
-unsafe impl<T: Sync + 'static> Sync for Lazy<T> {}
+unsafe impl<T: Send + Sync + 'static> Send for Lazy<T> {}
+
+unsafe impl<T: Send + Sync + 'static> Sync for Lazy<T> {}
