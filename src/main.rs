@@ -6,7 +6,6 @@
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
 #![feature(allocator_api)]
-#![feature(default_alloc_error_handler)]
 #![feature(nonnull_slice_from_raw_parts)]
 #![feature(strict_provenance)]
 #![feature(slice_ptr_get)]
@@ -15,6 +14,7 @@
 mod alloc;
 #[cfg(not(test))]
 mod irq;
+mod math;
 #[cfg(not(test))]
 mod mbox;
 #[cfg(not(test))]
@@ -30,6 +30,8 @@ mod video;
 #[cfg(not(test))]
 use core::arch::{asm, global_asm};
 #[cfg(not(test))]
+use core::f32::consts::FRAC_PI_2;
+#[cfg(not(test))]
 use core::fmt::Write;
 #[cfg(not(test))]
 use core::ops::Range;
@@ -39,20 +41,21 @@ use core::panic::PanicInfo;
 use core::write;
 
 #[cfg(not(test))]
-use sched::SCHED;
-
-#[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
-use self::touch::TOUCH;
+use self::math::{Matrix, Projector, Quaternion, Scalar, Vector};
+#[cfg(not(test))]
+use self::sched::SCHED;
+#[cfg(not(test))]
+use self::touch::Recognizer;
 #[cfg(not(test))]
 use self::uart::UART;
 #[cfg(not(test))]
-use self::video::VIDEO;
+use self::video::{Triangle, VIDEO};
 
 /// Heap range.
 #[cfg(not(test))]
-const HEAP_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (64 << 20);
+const HEAP_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (32 << 20);
 /// DMA RANGE.
 #[cfg(not(test))]
 const DMA_RANGE: Range<usize> = 0x1000 .. 0x80000;
@@ -62,7 +65,7 @@ const PERRY_RANGE: Range<usize> = 0x80000000 .. 0x84000000;
 /// Video core reserved range.
 #[cfg(not(test))]
 const VC_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
-/// CLogical CPU count.
+/// Logical CPU count.
 #[cfg(not(test))]
 const CPU_COUNT: usize = 4;
 /// Software generated IRQ that halts the system.
@@ -80,21 +83,33 @@ pub extern "C" fn start() -> !
     let affinity = cpu_id();
     debug!("Booted core #{affinity}");
     if affinity == 0 {
-        IRQ.register(HALT_IRQ, || {
-               halt();
-           });
+        IRQ.register(HALT_IRQ, || halt());
         SCHED.spawn(ticker());
     }
-    SCHED.start()
+    IRQ.dispatch()
 }
 
 /// Actions to perform in an infinite loop.
 #[cfg(not(test))]
-async fn ticker()
+async fn ticker() -> !
 {
+    let proj = Projector::perspective(FRAC_PI_2, 0.5, 4.0);
+    let tri = Triangle::new();
+    let cam = Matrix::default();
+    let pos = Vector::from_components(0.0, 0.0, -2.0);
+    let mut rot = Quaternion::default();
+    let scale = Scalar::default();
+    let mut recog = Recognizer::new();
     loop {
-        let points = TOUCH.poll();
-        VIDEO.draw_rings(points.as_slice());
+        recog.sample();
+        let vec0 = Vector::from_components(0.0, 0.0, 1.0);
+        let vec1 = recog.translated();
+        let axis = vec0.cross(vec0 + vec1);
+        let angle = vec1.length().to_angle();
+        rot = Quaternion::from_axis_angle(axis, angle) * rot;
+        rot = recog.rotated() * rot;
+        let mdl = Matrix::from_components(pos, rot, scale);
+        VIDEO.enqueue(tri.geom(), mdl, cam, proj);
         VIDEO.commit().await;
     }
 }
@@ -169,10 +184,14 @@ fn main() {}
 fn panic(info: &PanicInfo) -> !
 {
     let mut uart = UART.lock();
+    let affinity = cpu_id();
     if let Some(location) = info.location() {
-        write!(uart, "Panicked at {}:{}: ", location.file(), location.line()).unwrap()
+        write!(uart,
+               "Core #{affinity} panicked at {}:{}: ",
+               location.file(),
+               location.line()).unwrap()
     } else {
-        uart.write_str("Panic: ").unwrap()
+        write!(uart, "Core #{affinity} panic: ").unwrap()
     }
     if let Some(args) = info.message() {
         uart.write_fmt(*args).unwrap()
@@ -181,20 +200,9 @@ fn panic(info: &PanicInfo) -> !
     }
     uart.write_char('\n').unwrap();
     drop(uart);
+    backtrace();
     IRQ.trigger(HALT_IRQ);
     halt();
-}
-
-/// Puts the system to sleep until the next interrupt.
-#[cfg(not(test))]
-fn sleep()
-{
-    unsafe {
-        asm!("msr daifclr, #0x3",
-             "wfi",
-             "msr daifset, #0x3",
-             options(nomem, nostack, preserves_flags))
-    };
 }
 
 /// Returns the ID of the current CPU core.
@@ -210,4 +218,24 @@ fn cpu_id() -> usize
             options (nomem, nostack, preserves_flags));
     }
     id
+}
+
+/// Sends the return addresses of all the function calls from this function all
+/// the way to the boot code through the UART.
+#[cfg(not(test))]
+fn backtrace()
+{
+    let mut uart = UART.lock();
+    let mut fp: usize;
+    let mut lr: usize;
+    unsafe {
+        asm!("mov {fp}, fp", "mov {lr}, lr", fp = out (reg) fp, lr = out (reg) lr, options (nomem, nostack, preserves_flags))
+    };
+    let mut frame = 0usize;
+    writeln!(uart, "Backtrace:").unwrap();
+    while fp != 0x0 {
+        writeln!(uart, "#{frame}: 0x{lr:X}").unwrap();
+        unsafe { asm!("ldp {fp}, {lr}, [{fp}]", fp = inout (reg) fp, lr = out (reg) lr, options (preserves_flags)) };
+        frame += 1;
+    }
 }

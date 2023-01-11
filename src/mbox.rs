@@ -48,6 +48,8 @@ const SET_PHYS_SIZE_TAG: u32 = 0x48003;
 const SET_VIRT_SIZE_TAG: u32 = 0x48004;
 /// Set the pixel depth.
 const SET_DEPTH_TAG: u32 = 0x48005;
+/// Get the horizontal pitch.
+const GET_PITCH_TAG: u32 = 0x40008;
 /// Set the position of the physical display inside the buffer.
 const SET_POS_TAG: u32 = 0x48009;
 /// Set the touchscreen DMA buffer.
@@ -120,6 +122,8 @@ pub enum RequestProperty
     {
         bits: usize
     },
+    /// Get the horizontal pitch.
+    GetPitch,
     /// Set the physical display position inside the buffer.
     SetPosition
     {
@@ -157,6 +161,11 @@ pub enum ResponseProperty
     SetDepth
     {
         bits: usize
+    },
+    /// Get the horizontal pitch.
+    GetPitch
+    {
+        pitch: usize
     },
     /// Set the physical display position inside the buffer.
     SetPosition
@@ -281,6 +290,14 @@ impl Request
                     buf[idx + 3] = bits as _;
                     idx += 4;
                 }
+                RequestProperty::GetPitch => {
+                    assert!(idx + 4 < buf.len(), "Buffer overflow");
+                    buf[idx] = GET_PITCH_TAG;
+                    buf[idx + 1] = 4; // Request and response size.
+                    buf[idx + 2] = 0; // Reserved for response length.
+                    buf[idx + 3] = 0; // Reserved for response.
+                    idx += 4;
+                }
                 RequestProperty::SetPosition { x, y } => {
                     assert!(idx + 5 < buf.len(), "Buffer overflow");
                     buf[idx] = SET_POS_TAG;
@@ -353,6 +370,12 @@ impl Response
                     let bits = buf[idx] as usize;
                     idx += 1;
                     ResponseProperty::SetDepth { bits }
+                }
+                GET_PITCH_TAG => {
+                    assert!(idx + 1 < buf.len(), "Truncated response from VC");
+                    let pitch = buf[idx] as usize;
+                    idx += 1;
+                    ResponseProperty::GetPitch { pitch }
                 }
                 SET_POS_TAG => {
                     assert!(idx + 2 < buf.len(), "Truncated response from VC");

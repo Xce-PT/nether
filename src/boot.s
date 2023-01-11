@@ -208,6 +208,7 @@ boot:
     mov fp, #1 << 32
     sub fp, fp, x0, lsl #22 // 2MB gap between stacks.
     msr sp_el0, fp
+    mov fp, xzr
     eret
 
 // Map function.

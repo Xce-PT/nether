@@ -15,7 +15,7 @@ use crate::{cpu_id, CPU_COUNT};
 
 /// Lock guard whose lifetime determines how long the lock is held.
 #[derive(Debug)]
-pub struct Guard<'a, T>
+pub struct Guard<'a, T: ?Sized>
 {
     /// Lock to be released once this guard is dropped.
     lock: &'a Lock<T>,
@@ -25,7 +25,7 @@ pub struct Guard<'a, T>
 
 /// Lock container.
 #[derive(Debug)]
-pub struct Lock<T>
+pub struct Lock<T: ?Sized>
 {
     /// Actual spin-lock.
     advisor: Advisor,
@@ -51,7 +51,7 @@ pub struct Advisor
     is_locked: AtomicBool,
 }
 
-impl<'a, T> Guard<'a, T>
+impl<'a, T: ?Sized> Guard<'a, T>
 {
     /// Creates and initializes a new guard.
     ///
@@ -60,12 +60,13 @@ impl<'a, T> Guard<'a, T>
     /// Returns the newly created guard.
     fn new(lock: &'a Lock<T>) -> Self
     {
+        unsafe { lock.advisor.lock() };
         Self { lock,
                _data: PhantomData }
     }
 }
 
-impl<'a, T> Deref for Guard<'a, T>
+impl<'a, T: ?Sized> Deref for Guard<'a, T>
 {
     type Target = T;
 
@@ -75,7 +76,7 @@ impl<'a, T> Deref for Guard<'a, T>
     }
 }
 
-impl<'a, T> DerefMut for Guard<'a, T>
+impl<'a, T: ?Sized> DerefMut for Guard<'a, T>
 {
     fn deref_mut(&mut self) -> &'a mut Self::Target
     {
@@ -83,7 +84,7 @@ impl<'a, T> DerefMut for Guard<'a, T>
     }
 }
 
-impl<'a, T> Drop for Guard<'a, T>
+impl<'a, T: ?Sized> Drop for Guard<'a, T>
 {
     fn drop(&mut self)
     {
@@ -91,7 +92,7 @@ impl<'a, T> Drop for Guard<'a, T>
     }
 }
 
-impl<T> Lock<T>
+impl<T: ?Sized> Lock<T>
 {
     /// Creates and initializes a new lock.
     ///
@@ -99,6 +100,7 @@ impl<T> Lock<T>
     ///
     /// Returns the newly created lock.
     pub const fn new(content: T) -> Self
+        where T: Sized
     {
         Self { advisor: Advisor::new(),
                content: UnsafeCell::new(content) }
@@ -111,7 +113,6 @@ impl<T> Lock<T>
     /// lock until dropped.
     pub fn lock(&self) -> Guard<T>
     {
-        unsafe { self.advisor.lock() };
         Guard::new(self)
     }
 }
@@ -134,7 +135,8 @@ impl Advisor
     pub unsafe fn lock(&self)
     {
         let affinity = cpu_id();
-        assert_ne!(self.affinity.load(Ordering::Relaxed), affinity, "Deadlock detected");
+        assert!(self.affinity.load(Ordering::Relaxed) != affinity,
+                "Deadlock detected on core #{affinity}");
         while self.affinity
                   .compare_exchange_weak(CPU_COUNT, affinity, Ordering::SeqCst, Ordering::Relaxed)
                   .is_err()
@@ -153,9 +155,8 @@ impl Advisor
     pub unsafe fn unlock(&self)
     {
         let affinity = cpu_id();
-        assert_eq!(affinity,
-                   self.affinity.load(Ordering::Relaxed),
-                   "Attempted to relinquish a lock that is not held by this logical CPU");
+        assert!(affinity == self.affinity.load(Ordering::Relaxed),
+                "Core #{affinity} attempted to relinquish a lock that it doesn't hold");
         self.affinity.store(CPU_COUNT, Ordering::SeqCst);
     }
 }
@@ -182,6 +183,6 @@ impl Advisor
     }
 }
 
-unsafe impl<T> Send for Lock<T> {}
+unsafe impl<T: ?Sized> Send for Lock<T> {}
 
-unsafe impl<T> Sync for Lock<T> {}
+unsafe impl<T: ?Sized> Sync for Lock<T> {}
