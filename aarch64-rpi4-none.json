@@ -14,5 +14,6 @@
   "max-atomic-width": 128,
   "panic-strategy": "abort",
   "relocation-model": "static",
-  "target-pointer-width": "64"
+  "target-pointer-width": "64",
+  "frame-pointer": "always"
 }

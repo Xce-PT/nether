@@ -59,12 +59,9 @@ impl<T: Copy + Send> Sender<T>
         };
         let mut state = state.lock();
         state.val = Some(val);
-        let waker = if let Some(waker) = state.waker.take() {
-            waker
-        } else {
-            return;
-        };
-        waker.wake();
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
+        }
     }
 }
 

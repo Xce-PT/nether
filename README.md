@@ -1,16 +1,17 @@
 # Nether Battles
 
-Bare metal Raspberry Pi Dungeon Keeper clone.
+Bare metal Raspberry Pi Dungeon Keeper clone, in a very early development stage.
 
-![My hand with two extended fingers touching the official Raspberry Pi Touchscreen which is displaying a white ring around each finger on a black background](../../raw/main/rpi-ts.jpg)
+![Animated triangle with linearly interpolated colors rotating around the X axis](../../raw/main/triangle.gif)
 
-At the moment the only thing this project does is to display rings around each touch point on the official Raspberry Pi Touchscreen (pictured above), a "Hello world!" of sorts that demonstrates working video and touchscreen drivers.  The intention is to make this something resembling the original Dungeon Keeper game using colored shapes such as boxes, spheres, cylinders, and capsules as 3D models and vocal sound effects since I'm not an artist and am totally blind.
+At the moment the only thing this project does is to display a triangle that rotates whenever two-finger pan or rotation gestures are performed on the touchscreen, a hello world of sorts that shows a basic software 3D rasterizer with perspective correction running on a bare metal (that is, without an operating system) Raspberry Pi 4.  The final goal, which I'm not sure I'll be able to accomplish, is to turn it into a clone of the original Dungeon Keeper, maybe with support for assets of the original game, or maybe with primitive models such as spheres, cylinders, capsules, boxes, cones, as well as either vocal or synthesized sounds, since I'm totally blind and am not an artist.
+
+The purpose of this project is to demonstrate that, although I'm totally blind, that isn't stopping me from writing almost any kind of code, including kernel and computer graphics code, as well as to train myself in hopes to one day reenter the workforce and become an active member of society again.
 
 ## Hardware Requirements
 
 * Raspberry Pi 4 Model B
 * Official Raspberry Pi Touchscreen
-* FTDI TTL-232R-RPI debug cable or similar (optional)
 
 ## Building
 
@@ -28,7 +29,7 @@ At this point you should be inside the container at `/root/nether`, so to build 
 
     cargo build --release
 
-In order to boot a Raspberry Pi 4, you will need to create an image with a bootable FAT16 partition, place the files contained in this project's `boot` directory inside, and then flash the resulting image to an SD card or thumb drive.
+In order to boot a Raspberry Pi 4, you will need to create an image with a bootable FAT partition, place the files contained in this project's `boot` directory inside, and then flash the resulting image to an SD card or thumb drive.
 
 To create the file that will contain the bootable image, type the following:
 
@@ -44,6 +45,6 @@ Finally, to copy the contents of this project's `boot` directory to the newly cr
 
     mcopy boot/* c:
 
-At this point you have a raw image ready to flash to an SD card or thumb drive which you can extract from the container with the `docker cp` command.  Unfortunately since beyond this point things become less portable, and since currently I do not have access to Windows, I will leave the flashing process up to you.
+At this point you have a raw image ready to flash to an SD card or thumb drive that you can extract from the container with the `docker cp` command.  Unfortunately since beyond this point things become less portable, and since currently I do not have access to Windows, I will leave the flashing process up to you.
 
 If instead you want to boot from the network, the Raspberry Pi Foundation has published [an official tutorial](https://www.raspberrypi.com/documentation/computers/remote-access.html#network-boot-your-raspberry-pi) on how to do it from another Raspberry Pi.  There's also an option to boot from an HTTP server which you can read about in the [official bootloader configuration documentation](https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#raspberry-pi-4-bootloader-configuration).

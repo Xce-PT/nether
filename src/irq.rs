@@ -10,9 +10,13 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::arch::asm;
 use core::ptr::write_volatile;
+use core::sync::atomic::{fence, Ordering};
 
-use crate::sync::{Lazy, Lock};
+use crate::sync::{Lazy, RwLock};
 use crate::PERRY_RANGE;
 
 /// Number of SPIs on the BCM2711.
@@ -47,7 +51,8 @@ pub static IRQ: Lazy<Irq> = Lazy::new(Irq::new);
 pub struct Irq
 {
     /// Registered handlers.
-    handlers: Lock<BTreeMap<u32, fn()>>,
+    #[allow(clippy::type_complexity)]
+    handlers: RwLock<BTreeMap<u32, Vec<fn()>>>,
 }
 
 impl Irq
@@ -76,7 +81,7 @@ impl Irq
                              .skip(32)
                              .for_each(|element| write_volatile(element, 0xFF));
         }
-        Self { handlers: Lock::new(BTreeMap::new()) }
+        Self { handlers: RwLock::new(BTreeMap::new()) }
     }
 
     /// Registers a handler to be called when the specified IRQ is triggered.
@@ -86,44 +91,56 @@ impl Irq
     pub fn register(&self, irq: u32, handler: fn())
     {
         assert!((irq as usize) < IRQ_COUNT, "IRQ #{irq} is out of range");
-        let mut handlers = self.handlers.lock();
-        assert!(handlers.get(&irq).is_none(), "IRQ {irq} already has a handler");
+        let mut handlers = self.handlers.wlock();
+        // If there's at least one handler for this IRQ, just add the new handler
+        // without touching the controller's registers.
+        if let Some(vec) = handlers.get_mut(&irq) {
+            vec.push(handler);
+            return;
+        }
         // Figure out which register and bit to enable for the given IRQ.
         let val = 0x1 << (irq & 0x1F);
         let idx = irq as usize >> 5;
         unsafe { write_volatile((*GICD_ISENABLER).get_mut(idx).unwrap(), val) };
-        handlers.insert(irq, handler);
+        // Add a new vector of handlers along with the new handler.
+        let vec = vec![handler];
+        handlers.insert(irq, vec);
     }
 
-    /// Raises the specified Software Generated Interrupt on all cores except
-    /// the caller.
+    /// Raises the specified Software Generated Interrupt on all cores.
     ///
     /// * `irq`: IRQ to raise.
     pub fn trigger(&self, irq: u32)
     {
         assert!(irq < 16,
                 "Attempted to trigger a Software Generated Interrupt outside of the valid range");
-        let val = 0x1008000 | irq; // Target all cores except the one making this call.
+        let val = 0xFF8000 | irq; // Target all cores.
         unsafe { GICD_SGIR.write_volatile(val) };
     }
 
-    /// Checks for and processes all pending IRQs.
-    ///
-    /// This function is intended to be called once every main loop on every
-    /// core.
-    pub fn handle(&self)
+    /// Checks for and processes pending IRQs in an infinite loop.
+    pub fn dispatch(&self) -> !
     {
         loop {
             let val = unsafe { GICC_IAR.read_volatile() };
+            fence(Ordering::SeqCst);
             let irq = val & 0x3FF; // Strip sender info from SGIs.
             if irq as usize >= IRQ_COUNT {
-                break;
+                unsafe {
+                    asm!("msr daifclr, 0x3",
+                         "wfi",
+                         "msr daifset, 0x3",
+                         options(nomem, nostack, preserves_flags))
+                };
+                continue;
             }
-            let handler = *self.handlers
-                               .lock()
+            let handlers = self.handlers
+                               .rlock()
                                .get(&irq)
-                               .expect("Received an IRQ without a handler");
-            handler();
+                               .expect("Received an IRQ without a handler")
+                               .clone();
+            handlers.iter().for_each(|handler| handler());
+            fence(Ordering::SeqCst);
             unsafe { GICC_EOIR.write_volatile(val as _) };
         }
     }
