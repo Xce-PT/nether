@@ -129,16 +129,18 @@ impl Scheduler
     /// IRQ handler that polls all active tasks.
     fn poll()
     {
-        loop {
-            let task = if let Some(task) = SCHED.scheduled.lock().pop_front() {
-                task
-            } else {
-                return;
-            };
+        let mut scheduled = SCHED.scheduled.lock();
+        let task = scheduled.pop_front();
+        let is_empty = scheduled.is_empty();
+        drop(scheduled);
+        if let Some(task) = task {
             let mut task = task.lock();
             let finished = task.resume();
             if finished {
                 SCHED.running.lock().remove(&task.id());
+            }
+            if !is_empty {
+                IRQ.trigger(SCHED_IRQ);
             }
         }
     }
