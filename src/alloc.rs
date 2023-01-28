@@ -8,40 +8,40 @@ use core::slice::from_raw_parts as slice_from_raw_parts;
 
 use crate::sync::Lock;
 #[cfg(not(test))]
-use crate::{DMA_RANGE, HEAP_RANGE};
+use crate::{CACHED_RANGE, DMA_RANGE};
 
-/// Heap allocator instance.
+/// Global allocator instance.
 #[cfg(not(test))]
 #[global_allocator]
-pub static HEAP: Shell = Shell::new(&HEAP_CORE);
-/// DMA allocator instance.
+pub static GLOBAL: Alloc<0x10> = Alloc::with_region(&CACHED);
+/// Cached region.
 #[cfg(not(test))]
-pub static DMA: Shell = Shell::new(&DMA_CORE);
-
-/// Heap allocator core.
+pub static CACHED: Lock<Region> = unsafe { Region::new(CACHED_RANGE) };
+/// DMA region.
 #[cfg(not(test))]
-static HEAP_CORE: Lock<Core> = unsafe { Core::new(HEAP_RANGE) };
-/// DMA allocator core.
-#[cfg(not(test))]
-static DMA_CORE: Lock<Core> = unsafe { Core::new(DMA_RANGE) };
+pub static DMA: Lock<Region> = unsafe { Region::new(DMA_RANGE) };
 
 /// Free list allocator front-end.
 #[derive(Clone, Copy, Debug)]
-pub struct Shell<'a>
+pub struct Alloc<'a, const ALIGN: usize>
+    where Self: ValidAlign
 {
-    /// Shared core of all copies of this allocator.
-    core: &'a Lock<Core>,
+    /// Allocator region.
+    region: &'a Lock<Region>,
 }
 
-/// Shared allocator core.
+/// Allocator region.
 #[derive(Debug)]
-struct Core
+pub struct Region
 {
     /// Initial free range.
     range: Range<usize>,
     /// Head of the list of free fragments.
     head: Option<*mut Fragment>,
 }
+
+/// Valid alignment marker.
+pub trait ValidAlign {}
 
 /// Free memory fragment.
 #[derive(Debug)]
@@ -53,24 +53,24 @@ struct Fragment
     next: *mut Fragment,
 }
 
-impl<'a> Shell<'a>
+impl<'a, const ALIGN: usize> Alloc<'a, ALIGN> where Self: ValidAlign
 {
-    /// Creates and initializes a new allocator shell.
+    /// Creates and initializes a new allocator front-end.
     ///
-    /// * `core`: Shared core of all instances of this allocator.
+    /// * `region`: Memory region covered by this allocator.
     ///
-    /// Returns the created allocator shell.
-    const fn new(core: &'a Lock<Core>) -> Self
+    /// Returns the created allocator front-end.
+    pub const fn with_region(region: &'a Lock<Region>) -> Self
     {
-        Self { core }
+        Self { region }
     }
 }
 
-unsafe impl<'a> GlobalAlloc for Shell<'a>
+unsafe impl<'a, const ALIGN: usize> GlobalAlloc for Alloc<'a, ALIGN> where Self: ValidAlign
 {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8
     {
-        self.core
+        self.region
             .lock()
             .allocate(layout)
             .map(|base| base.as_mut_ptr().cast::<u8>())
@@ -79,20 +79,20 @@ unsafe impl<'a> GlobalAlloc for Shell<'a>
 
     unsafe fn dealloc(&self, base: *mut u8, layout: Layout)
     {
-        self.core.lock().deallocate(NonNull::new_unchecked(base), layout);
+        self.region.lock().deallocate(NonNull::new_unchecked(base), layout);
     }
 
     unsafe fn realloc(&self, base: *mut u8, layout: Layout, new_size: usize) -> *mut u8
     {
         let new_layout = Layout::from_size_align(new_size, layout.align()).unwrap();
         if new_size >= layout.size() {
-            return self.core
+            return self.region
                        .lock()
                        .grow(NonNull::new_unchecked(base), layout, new_layout)
                        .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
                        .unwrap_or(null_mut());
         }
-        self.core
+        self.region
             .lock()
             .shrink(NonNull::new_unchecked(base), layout, new_layout)
             .map(|ptr| ptr.as_mut_ptr().cast::<u8>())
@@ -100,39 +100,49 @@ unsafe impl<'a> GlobalAlloc for Shell<'a>
     }
 }
 
-unsafe impl<'a> Allocator for Shell<'a>
+unsafe impl<'a, const ALIGN: usize> Allocator for Alloc<'a, ALIGN> where Self: ValidAlign
 {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>
     {
-        self.core.lock().allocate(layout)
+        let layout = Layout::from_size_align(layout.size(), max(ALIGN, layout.align())).unwrap();
+        self.region.lock().allocate(layout)
     }
 
     unsafe fn deallocate(&self, base: NonNull<u8>, layout: Layout)
     {
-        self.core.lock().deallocate(base, layout)
+        let layout = Layout::from_size_align(layout.size(), max(ALIGN, layout.align())).unwrap();
+        self.region.lock().deallocate(base, layout)
     }
 
     unsafe fn grow(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
                    -> Result<NonNull<[u8]>, AllocError>
     {
-        self.core.lock().grow(base, old_layout, new_layout)
+        let old_layout = Layout::from_size_align(old_layout.size(), max(ALIGN, old_layout.align())).unwrap();
+        let new_layout = Layout::from_size_align(new_layout.size(), max(ALIGN, new_layout.align())).unwrap();
+        self.region.lock().grow(base, old_layout, new_layout)
     }
 
     unsafe fn shrink(&self, base: NonNull<u8>, old_layout: Layout, new_layout: Layout)
                      -> Result<NonNull<[u8]>, AllocError>
     {
-        self.core.lock().shrink(base, old_layout, new_layout)
+        let old_layout = Layout::from_size_align(old_layout.size(), max(ALIGN, old_layout.align())).unwrap();
+        let new_layout = Layout::from_size_align(new_layout.size(), max(ALIGN, new_layout.align())).unwrap();
+        self.region.lock().shrink(base, old_layout, new_layout)
     }
 }
 
-impl Core
+impl<'a> ValidAlign for Alloc<'a, 0x10> {}
+impl<'a> ValidAlign for Alloc<'a, 0x40> {}
+impl<'a> ValidAlign for Alloc<'a, 0x1000> {}
+impl<'a> ValidAlign for Alloc<'a, 0x200000> {}
+
+impl Region
 {
-    /// Creates and initializes a new allocator shared core.
+    /// Creates and initializes a new allocator region.
     ///
-    /// * `range`: The memory range covered by all the shell allocator instances
-    ///   sharing this core.
+    /// * `range`: The memory range covered by this region.
     ///
-    /// Returns the created core.
+    /// Returns the created region.
     const unsafe fn new(range: Range<usize>) -> Lock<Self>
     {
         let this = Self { range, head: None };
@@ -196,9 +206,10 @@ impl Core
         }
     }
 
-    /// Deallocates the memory at base with the specified layout.
+    /// Deallocates the memory starting at the specified base address with the
+    /// specified layout.
     ///
-    /// * `base`: Base of the memory to deallocate.
+    /// * `base`: Base address of the memory to deallocate.
     /// * `layout`: Layout of the allocated memory.
     unsafe fn deallocate(&mut self, base: NonNull<u8>, layout: Layout)
     {
@@ -237,10 +248,10 @@ impl Core
         }
     }
 
-    /// Attempts to grow the block of memory at base with the specified layout
-    /// to a new layout.
+    /// Attempts to grow the block of memory at the specified base address with
+    /// the specified layout to a new layout.
     ///
-    /// * `base`: Base of the memory block to grow.
+    /// * `base`: Base address of the memory block to grow.
     /// * `old_layout`: Old layout to grow from.
     /// * `new_layout`: New layout to grow to.
     ///
@@ -335,10 +346,10 @@ impl Core
         Ok(slice)
     }
 
-    /// Attempts to shrink the block of memory at base from the specified old
-    /// layout to a new layout.
+    /// Attempts to shrink the block of memory at the specified base address
+    /// from the specified old layout to a new layout.
     ///
-    /// * `base`: Base of the memory block to shrink.
+    /// * `base`: Base address of the memory block to shrink.
     /// * `old_layout`: Layout to shrink from.
     /// * `new_layout`: Layout to shrink to.
     ///
@@ -455,12 +466,12 @@ mod tests
             Self { buf: [0xFF; 0x1000] }
         }
 
-        fn provide(&mut self, core: &Lock<Core>, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
+        fn provide(&mut self, region: &Lock<Region>, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
         {
             let mut offset = 0usize;
             let mut prev = null_mut::<Fragment>();
             let buf = self.buf.as_mut_ptr();
-            core.lock().head = Some(null_mut());
+            region.lock().head = Some(null_mut());
             for frag in frags {
                 let frag = frag.start .. frag.end;
                 if frag.start >= frag.end {
@@ -482,7 +493,7 @@ mod tests
                     if !prev.is_null() {
                         (*prev).next = current;
                     } else {
-                        core.lock().head = Some(current);
+                        region.lock().head = Some(current);
                     }
                     offset += frag.end - frag.start;
                     prev = current;
@@ -491,10 +502,10 @@ mod tests
             Ok(())
         }
 
-        fn validate(&self, core: &Lock<Core>, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
+        fn validate(&self, region: &Lock<Region>, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
         {
             let mut offset = 0usize;
-            let mut current = *core.lock().head.as_ref().unwrap();
+            let mut current = *region.lock().head.as_ref().unwrap();
             let buf = self.buf.as_ptr();
             for frag in frags {
                 let frag = frag.start .. frag.end;
@@ -698,11 +709,11 @@ mod tests
     fn test_alloc(layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let core = unsafe { Core::new(buf.range()) };
-        let alloc = Shell::new(&core);
-        buf.provide(&core, input).map_err(TestError::Input)?;
+        let region = unsafe { Region::new(buf.range()) };
+        let alloc = Alloc::<0x10>::with_region(&region);
+        buf.provide(&region, input).map_err(TestError::Input)?;
         let base = unsafe { alloc.alloc(layout) as usize };
-        buf.validate(&core, output).map_err(TestError::Output)?;
+        buf.validate(&region, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }
@@ -714,12 +725,12 @@ mod tests
                     -> Result<(), TestError>
     {
         let mut buf = Buffer::new();
-        let core = unsafe { Core::new(buf.range()) };
-        let alloc = Shell::new(&core);
-        buf.provide(&core, input).map_err(TestError::Input)?;
+        let region = unsafe { Region::new(buf.range()) };
+        let alloc = Alloc::<0x10>::with_region(&region);
+        buf.provide(&region, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
         unsafe { alloc.dealloc(base as _, layout) };
-        buf.validate(&core, output).map_err(TestError::Output)?;
+        buf.validate(&region, output).map_err(TestError::Output)?;
         Ok(())
     }
 
@@ -727,16 +738,16 @@ mod tests
                     -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let core = unsafe { Core::new(buf.range()) };
-        let alloc = Shell::new(&core);
-        buf.provide(&core, input).map_err(TestError::Input)?;
+        let region = unsafe { Region::new(buf.range()) };
+        let alloc = Alloc::<0x10>::with_region(&region);
+        buf.provide(&region, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
         let size = min(layout.size(), new_size);
         for offset in 0 .. size / 2 {
             unsafe { (base as *mut u16).add(offset).write(offset as _) }
         }
         let base = unsafe { alloc.realloc(base as _, layout, new_size) as usize };
-        buf.validate(&core, output).map_err(TestError::Output)?;
+        buf.validate(&region, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }

@@ -53,9 +53,9 @@ use self::uart::UART;
 #[cfg(not(test))]
 use self::video::{Triangle, VIDEO};
 
-/// Heap range.
+/// Cached range.
 #[cfg(not(test))]
-const HEAP_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (32 << 20);
+const CACHED_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (32 << 20);
 /// DMA RANGE.
 #[cfg(not(test))]
 const DMA_RANGE: Range<usize> = 0x1000 .. 0x80000;

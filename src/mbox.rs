@@ -14,7 +14,7 @@ use alloc::boxed::Box;
 use core::hint::spin_loop;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::alloc::{Shell as Allocator, DMA};
+use crate::alloc::{Alloc, DMA};
 use crate::sync::{Lazy, Lock};
 use crate::{DMA_RANGE, PERRY_RANGE, VC_RANGE};
 
@@ -58,12 +58,15 @@ const SET_TOUCH_BUF_TAG: u32 = 0x4801F;
 /// Global video core mailbox interface driver instance.
 pub static MBOX: Lazy<Mailbox> = Lazy::new(Mailbox::new);
 
+/// Aligned DMA allocator.
+static DMA_ALLOC: Alloc<0x10> = Alloc::with_region(&DMA);
+
 /// Mailbox interface driver.
 #[derive(Debug)]
 pub struct Mailbox
 {
     /// DMA buffer.
-    buf: Lock<Box<Buffer, Allocator<'static>>>,
+    buf: Lock<Box<Buffer, Alloc<'static, 0x10>>>,
 }
 
 /// Request to send to the video core.
@@ -192,7 +195,7 @@ impl Mailbox
     /// Returns the newly created mailbox.
     fn new() -> Self
     {
-        Self { buf: Lock::new(Box::new_in(Buffer { content: [0; 80] }, DMA)) }
+        Self { buf: Lock::new(Box::new_in(Buffer { content: [0; 80] }, DMA_ALLOC)) }
     }
 
     /// Delivers the request and waits for a response.
