@@ -1,7 +1,7 @@
 brace_style = "AlwaysNextLine"
 condense_wildcard_suffixes = true
 error_on_line_overflow = true
-fn_args_layout = "Compressed"
+fn_params_layout = "Compressed"
 hex_literal_case = "upper"
 imports_indent = "Visual"
 indent_style = "Visual"
