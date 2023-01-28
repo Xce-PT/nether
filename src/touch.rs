@@ -9,7 +9,7 @@ use core::cmp::min;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::alloc::{Shell as Allocator, DMA};
+use crate::alloc::{Alloc, DMA};
 use crate::irq::IRQ;
 use crate::math::{Normal, Quaternion, Scalar, Vector};
 use crate::mbox::{Request, RequestProperty, MBOX};
@@ -29,12 +29,15 @@ const HEIGHT: i16 = 480;
 /// Global touchscreen driver instance.
 pub static TOUCH: Lazy<Touch> = Lazy::new(Touch::new);
 
+/// DMA allocator instance.
+static DMA_ALLOC: Alloc<0x10> = Alloc::with_region(&DMA);
+
 /// Touchscreen driver.
 #[derive(Debug)]
 pub struct Touch
 {
     /// Touchscreen buffer.
-    state: Lock<Box<State, Allocator<'static>>>,
+    state: Lock<Box<State, Alloc<'static, 0x10>>>,
     /// Saved touch points for comparison.
     saved: RwLock<Option<(Vector, Vector)>>,
 }
@@ -96,7 +99,7 @@ impl Touch
         #[allow(clippy::uninit_assumed_init)] // Same as above.
         let mut state = unsafe { MaybeUninit::<State>::uninit().assume_init() };
         state.points_len = INVALID_POINTS;
-        let mut state = Box::new_in(state, DMA);
+        let mut state = Box::new_in(state, DMA_ALLOC);
         let mut req = Request::new();
         req.push(RequestProperty::SetTouchBuffer { buf: state.as_mut() as *mut State as _ });
         MBOX.exchange(req);
