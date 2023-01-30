@@ -1,0 +1,38 @@
+#!/bin/sh
+
+if test -z "`which rustc`"; then
+    echo "Rust does not appear to be properly installed."
+    exit 1
+fi
+
+name="nether"
+basedir="`dirname \"$0\"`"
+depsdir="$basedir/deps"
+sysroot="`rustc --print sysroot`"
+flags="--edition 2021 --target \"$basedir/aarch64-rpi4-none.json\" -C opt-level=3 -L \"$depsdir\""
+libflags="--crate-type lib --emit link,metadata --out-dir \"$depsdir\""
+binflags="-o boot/kernel8.img"
+rustsrcdir="$sysroot/lib/rustlib/src/rust/library"
+
+if test ! -f "$rustsrcdir/core/src/lib.rs" -o ! -f "$rustsrcdir/alloc/src/lib.rs"; then
+    echo "Component rust-src does not appear to be properly installed."
+    exit 1
+fi
+
+if test ! -f "$depsdir/libcore.rmeta" -o "$rustsrcdir/core/src/lib.rs" -nt "$depsdir/libcore.rmeta"; then
+    echo "Compiling core..."
+    eval rustc --crate-name core $flags $libflags "$rustsrcdir/core/src/lib.rs" || exit 1
+fi
+
+if test ! -f "$depsdir/libcompiler_builtins.rmeta" -o "$basedir/src/compiler_builtins.rs" -nt "$depsdir/libcompiler_builtins.rmeta" -o "$depsdir/libcore.rmeta" -nt "$depsdir/libcompiler_builtins.rmeta"; then
+    echo "Compiling compiler_builtins..."
+    eval rustc --crate-name compiler_builtins $flags $libflags "src/builtin.rs" || exit 1
+fi
+
+if test ! -f "$depsdir/liballoc.rmeta" -o "$depsdir/libcompiler_builtins.rmeta" -nt "$depsdir/liballoc.rmeta" -o "$rustsrcdir/alloc/src/lib.rs" -nt "$depsdir/liballoc.rmeta"; then
+    echo "Compiling alloc..."
+    eval rustc --crate-name "alloc" $flags $libflags "$sysroot/lib/rustlib/src/rust/library/alloc/src/lib.rs" || exit 1
+fi
+
+echo "Compiling $name..."
+eval rustc $flags $binflags "$basedir/src/main.rs" || exit 1

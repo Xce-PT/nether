@@ -1,0 +1,12 @@
+#!/bin/sh
+
+if test -z "`which rustfmt`"; then
+    echo "Component rustfmt does not appear to be properly installed."
+    exit 1
+fi
+
+name="nether"
+basedir="`dirname \"$0\"`"
+
+echo "Formatting $name..."
+find "$basedir/src" -name '*.rs' | xargs rustfmt --edition 2021 || exit 1
