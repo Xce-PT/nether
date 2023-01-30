@@ -1,0 +1,13 @@
+#!/bin/sh#!/bin/sh
+
+if test -z "`which rustc`"; then
+    echo "Rust does not appear to be properly installed."
+    exit 1
+fi
+
+name="nether"
+basedir="`dirname \"$0\"`"
+
+echo "Compiling $name for testing..."
+rustc --edition 2021 --test -o "$basedir/test-harness" "$basedir/src/main.rs" || exit 1
+"$basedir/test-harness" "$@" || exit 1
