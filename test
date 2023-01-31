@@ -1,13 +1,14 @@
-#!/bin/sh#!/bin/sh
+#!/bin/sh
 
-if test -z "`which rustc`"; then
-    echo "Rust does not appear to be properly installed."
+if test -z "`which rustc`" -o -z "`rustc +nightly -V 2>/dev/null`"; then
+    echo "Nightly Rust does not appear to be properly installed."
     exit 1
 fi
 
+cd "`dirname \"$0\"`" || exit 1
+
 name="nether"
-basedir="`dirname \"$0\"`"
 
 echo "Compiling $name for testing..."
-rustc --edition 2021 --test -o "$basedir/test-harness" "$basedir/src/main.rs" || exit 1
-"$basedir/test-harness" "$@" || exit 1
+rustc +nightly --edition 2021 --test -o test-harness src/main.rs || exit 1
+./test-harness "$@" || exit 1
