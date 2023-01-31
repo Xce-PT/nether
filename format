@@ -1,12 +1,13 @@
 #!/bin/sh
 
-if test -z "`which rustfmt`"; then
-    echo "Component rustfmt does not appear to be properly installed."
+if test -z "`which rustfmt`" -o -z "`rustfmt +nightly -V 2>/dev/null`"; then
+    echo "Component rustfmt from nightly Rust does not appear to be properly installed."
     exit 1
 fi
 
+cd "`dirname \"$0\"`" || exit 1
+
 name="nether"
-basedir="`dirname \"$0\"`"
 
 echo "Formatting $name..."
-find "$basedir/src" -name '*.rs' | xargs rustfmt --edition 2021 || exit 1
+find src -name '*.rs' | xargs rustfmt +nightly --edition 2021 || exit 1
