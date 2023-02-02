@@ -18,6 +18,8 @@ mod math;
 #[cfg(not(test))]
 mod mbox;
 #[cfg(not(test))]
+mod pixvalve;
+#[cfg(not(test))]
 mod sched;
 mod sync;
 #[cfg(not(test))]

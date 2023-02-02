@@ -10,8 +10,6 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use alloc::vec;
-use alloc::vec::Vec;
 use core::arch::asm;
 use core::ptr::write_volatile;
 use core::sync::atomic::{fence, Ordering};
@@ -51,8 +49,7 @@ pub static IRQ: Lazy<Irq> = Lazy::new(Irq::new);
 pub struct Irq
 {
     /// Registered handlers.
-    #[allow(clippy::type_complexity)]
-    handlers: RwLock<BTreeMap<u32, Vec<fn()>>>,
+    handlers: RwLock<BTreeMap<u32, fn()>>,
 }
 
 impl Irq
@@ -88,23 +85,19 @@ impl Irq
     ///
     /// * `irq`: IRQ to wait for.
     /// * `handler`: Handler function to register.
+    ///
+    /// Panics if a handler is already registered for the specified IRQ.
+    #[track_caller]
     pub fn register(&self, irq: u32, handler: fn())
     {
         assert!((irq as usize) < IRQ_COUNT, "IRQ #{irq} is out of range");
         let mut handlers = self.handlers.wlock();
-        // If there's at least one handler for this IRQ, just add the new handler
-        // without touching the controller's registers.
-        if let Some(vec) = handlers.get_mut(&irq) {
-            vec.push(handler);
-            return;
-        }
+        assert!(handlers.insert(irq, handler).is_none(),
+                "Attempted to add a second handler for IRQ {irq}");
         // Figure out which register and bit to enable for the given IRQ.
         let val = 0x1 << (irq & 0x1F);
         let idx = irq as usize >> 5;
         unsafe { write_volatile((*GICD_ISENABLER).get_mut(idx).unwrap(), val) };
-        // Add a new vector of handlers along with the new handler.
-        let vec = vec![handler];
-        handlers.insert(irq, vec);
     }
 
     /// Raises the specified Software Generated Interrupt on all cores.
@@ -126,20 +119,14 @@ impl Irq
             fence(Ordering::SeqCst);
             let irq = val & 0x3FF; // Strip sender info from SGIs.
             if irq as usize >= IRQ_COUNT {
-                unsafe {
-                    asm!("msr daifclr, 0x3",
-                         "wfi",
-                         "msr daifset, 0x3",
-                         options(nomem, nostack, preserves_flags))
-                };
+                unsafe { asm!("msr daifclr, #0x3", "wfi", options(nomem, nostack, preserves_flags)) };
                 continue;
             }
-            let handlers = self.handlers
+            let handler = *self.handlers
                                .rlock()
                                .get(&irq)
-                               .expect("Received an IRQ without a handler")
-                               .clone();
-            handlers.iter().for_each(|handler| handler());
+                               .expect("Received an IRQ without a handler");
+            handler();
             fence(Ordering::SeqCst);
             unsafe { GICC_EOIR.write_volatile(val as _) };
         }
