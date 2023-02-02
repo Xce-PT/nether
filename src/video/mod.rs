@@ -22,23 +22,13 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
 pub use self::geom::*;
-use crate::irq::IRQ;
 use crate::math::{Color, Matrix, Projector, Triangulation, Vector};
 use crate::mbox::{Request, RequestProperty, ResponseProperty, MBOX};
+use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
 use crate::sync::{Lazy, Lock, RwLock};
-use crate::{CPU_COUNT, PERRY_RANGE};
+use crate::CPU_COUNT;
 
-/// Pixel valve 1 IRQ.
-const PV1_IRQ: u32 = 142;
-/// Pixel valve 1 base address.
-const PV1_BASE: usize = 0x2207000 + PERRY_RANGE.start;
-/// Pixel valve 1 interrupt enable register.
-const PV1_INTEN: *mut u32 = (PV1_BASE + 0x24) as _;
-/// Pixel valve 1 status and acknowledgement register.
-const PV1_STAT: *mut u32 = (PV1_BASE + 0x28) as _;
-/// Pixel valve VSync interrupt enable flag.
-const PV_VSYNC: u32 = 0x10;
 /// Screen width.
 const SCREEN_WIDTH: usize = 800;
 /// Screen height.
@@ -149,8 +139,7 @@ impl Video
                 _ => continue,
             }
         }
-        IRQ.register(PV1_IRQ, Self::vsync);
-        unsafe { PV1_INTEN.write_volatile(PV_VSYNC) };
+        PIXVALVE.register_vsync(Self::vsync);
         this
     }
 
@@ -194,7 +183,7 @@ impl Video
         }
         self.cmds.wlock().clear();
         self.tile.store(0, Ordering::Relaxed);
-        unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
+        PIXVALVE.ack_vsync();
         let vsync = VerticalSync::new(self.frame.load(Ordering::Relaxed));
         vsync.await;
     }
@@ -267,7 +256,7 @@ impl Video
     /// Flips the frame buffers.
     fn vsync()
     {
-        if VIDEO.tile.load(Ordering::Relaxed) != 0 || unsafe { PV1_STAT.read_volatile() } & PV_VSYNC == 0 {
+        if VIDEO.tile.load(Ordering::Relaxed) != 0 {
             return;
         }
         let frame = VIDEO.frame.fetch_add(1, Ordering::Relaxed);

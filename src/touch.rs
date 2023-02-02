@@ -10,13 +10,11 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::alloc::{Alloc, DMA};
-use crate::irq::IRQ;
 use crate::math::{Normal, Quaternion, Scalar, Vector};
 use crate::mbox::{Request, RequestProperty, MBOX};
+use crate::pixvalve::PIXVALVE;
 use crate::sync::{Lazy, Lock, RwLock};
 
-/// Video IRQ which we piggyback on since the touchscreen has no IRQ of its own.
-const TOUCH_IRQ: u32 = 142;
 /// Maximum number of touch points tracked by the video core.
 const MAX_POINTS: usize = 10;
 /// Invalid points length used by the VC as a poor man's lock.
@@ -104,7 +102,7 @@ impl Touch
         req.push(RequestProperty::SetTouchBuffer { buf: state.as_mut() as *mut State as _ });
         MBOX.exchange(req);
         let saved = None;
-        IRQ.register(TOUCH_IRQ, Self::poll);
+        PIXVALVE.register_vsync(Self::poll);
         Self { state: Lock::new(state),
                saved: RwLock::new(saved) }
     }
@@ -121,7 +119,6 @@ impl Touch
         }
         hw_state.points_len = INVALID_POINTS;
         fence(Ordering::Release);
-        drop(hw_state);
         // We're only interested in information containing two touch points.
         if state.points_len != 2 {
             *TOUCH.saved.wlock() = None;
