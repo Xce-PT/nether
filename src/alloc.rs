@@ -8,18 +8,18 @@ use core::slice::from_raw_parts as slice_from_raw_parts;
 
 use crate::sync::Lock;
 #[cfg(not(test))]
-use crate::{CACHED_RANGE, DMA_RANGE};
+use crate::{CACHED_RANGE, UNCACHED_RANGE};
 
 /// Global allocator instance.
 #[cfg(not(test))]
 #[global_allocator]
-pub static GLOBAL: Alloc<0x10> = Alloc::with_region(&CACHED);
+pub static CACHED: Alloc<0x10> = Alloc::with_region(&CACHED_REGION);
 /// Cached region.
 #[cfg(not(test))]
-pub static CACHED: Lock<Region> = unsafe { Region::new(CACHED_RANGE) };
+pub static CACHED_REGION: Lock<Region> = unsafe { Region::new(CACHED_RANGE) };
 /// DMA region.
 #[cfg(not(test))]
-pub static DMA: Lock<Region> = unsafe { Region::new(DMA_RANGE) };
+pub static UNCACHED_REGION: Lock<Region> = unsafe { Region::new(UNCACHED_RANGE) };
 
 /// Free list allocator front-end.
 #[derive(Clone, Copy, Debug)]
