@@ -67,7 +67,6 @@ impl PixelValve
     /// Acknowledges the reception of the last vertical synchronization event.
     pub fn ack_vsync(&self)
     {
-        unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
         self.vsync_ack.store(true, Ordering::Relaxed);
     }
 
@@ -78,10 +77,8 @@ impl PixelValve
         if unsafe { PV1_STAT.read_volatile() } & PV_VSYNC == 0 || !PIXVALVE.vsync_ack.load(Ordering::Relaxed) {
             return;
         }
-        if !PIXVALVE.vsync_ack.load(Ordering::Relaxed) {
-            unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
-            return;
-        }
+        unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
+        PIXVALVE.vsync_ack.store(false, Ordering::Relaxed);
         // Append all scheduled handlers to the handler list.  Doing it this way avoids
         // a potential deadlock if a handler tries to schedule another handler, and also
         // avoids unnecessary memory allocations and deallocations that would result
@@ -89,6 +86,7 @@ impl PixelValve
         let mut hdlrs = PIXVALVE.vsync_hdlrs.lock();
         let mut new_hdlrs = PIXVALVE.vsync_new_hdlrs.lock();
         hdlrs.append(&mut *new_hdlrs);
+        drop(new_hdlrs);
         hdlrs.iter().for_each(|hdlr| hdlr());
     }
 }
