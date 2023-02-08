@@ -36,9 +36,13 @@ use core::f32::consts::FRAC_PI_2;
 #[cfg(not(test))]
 use core::fmt::Write;
 #[cfg(not(test))]
+use core::mem::size_of_val;
+#[cfg(not(test))]
 use core::ops::Range;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+#[cfg(not(test))]
+use core::sync::atomic::{compiler_fence, Ordering};
 #[cfg(not(test))]
 use core::write;
 
@@ -55,21 +59,48 @@ use self::uart::UART;
 #[cfg(not(test))]
 use self::video::{Triangle, VIDEO};
 
+/// uncached RANGE.
+#[cfg(not(test))]
+const UNCACHED_RANGE: Range<usize> = 0x1000 .. 0x80000;
 /// Cached range.
 #[cfg(not(test))]
-const CACHED_RANGE: Range<usize> = 0x40000000 .. 0x80000000 - (32 << 20);
-/// DMA RANGE.
-#[cfg(not(test))]
-const DMA_RANGE: Range<usize> = 0x1000 .. 0x80000;
+const CACHED_RANGE: Range<usize> = 0x40000000 .. 0x7C000000;
 /// Peripherals range.
 #[cfg(not(test))]
 const PERRY_RANGE: Range<usize> = 0x80000000 .. 0x84000000;
-/// Video core reserved range.
+/// Video memory range.
 #[cfg(not(test))]
-const VC_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
+const VIDEO_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
+/// Stack ranges.
+#[cfg(not(test))]
+const STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xFFE00000 .. 0x100000000,
+                                                 0xFFA00000 .. 0xFFC00000,
+                                                 0xFF600000 .. 0xFF800000,
+                                                 0xFF200000 .. 0xFF400000];
+/// Uncached range from the perspective of the DMA controller.
+#[cfg(not(test))]
+const DMA_UNCACHED_RANGE: Range<usize> = 0xC0001000 .. 0xC0080000;
+/// Cached range from the perspective of the DMA controller.
+#[cfg(not(test))]
+const DMA_CACHED_RANGE: Range<usize> = 0xC2000000 .. 0xCE000000;
+/// Peripherals range from the perspective of the DMA controller.
+#[cfg(not(test))]
+const DMA_PERRY_RANGE: Range<usize> = 0x7C000000 .. 0x80000000;
+/// Video memory from the perspective of the DMA controller.
+#[cfg(not(test))]
+const DMA_VIDEO_RANGE: Range<usize> = 0xFE000000 .. 0x100000000;
+/// Stack ranges from the perspective of the DMA controller.
+#[cfg(not(test))]
+const DMA_STACK_RANGES: [Range<usize>; CPU_COUNT] = [0x800000 .. 0xA00000,
+                                                     0x600000 .. 0x800000,
+                                                     0x400000 .. 0x600000,
+                                                     0x200000 .. 0x400000];
 /// Logical CPU count.
 #[cfg(not(test))]
 const CPU_COUNT: usize = 4;
+/// Size of a cache line.
+#[cfg(not(test))]
+const CACHELINE_SIZE: usize = 64;
 /// Software generated IRQ that halts the system.
 #[cfg(not(test))]
 const HALT_IRQ: u32 = 0;
@@ -205,6 +236,135 @@ fn panic(info: &PanicInfo) -> !
     backtrace();
     IRQ.trigger(HALT_IRQ);
     halt();
+}
+
+/// Converts the specified virtual address to a physical address from the
+/// perspective of the DMA controller.
+///
+/// * `addr`: Address to convert.
+///
+/// Returns the converted address.
+///
+/// Panics if the requested address is not accessible by the DMA controller.
+#[cfg(not(test))]
+#[track_caller]
+fn to_dma(addr: usize) -> usize
+{
+    if UNCACHED_RANGE.contains(&addr) {
+        return addr - UNCACHED_RANGE.start + DMA_UNCACHED_RANGE.start;
+    }
+    if CACHED_RANGE.contains(&addr) {
+        return addr - CACHED_RANGE.start + DMA_CACHED_RANGE.start;
+    }
+    if PERRY_RANGE.contains(&addr) {
+        return addr - PERRY_RANGE.start + DMA_PERRY_RANGE.start;
+    }
+    if VIDEO_RANGE.contains(&addr) {
+        return addr - VIDEO_RANGE.start + DMA_VIDEO_RANGE.start;
+    }
+    for cpu in 0 .. CPU_COUNT {
+        if STACK_RANGES[cpu].contains(&addr) {
+            return addr - STACK_RANGES[cpu].start + DMA_STACK_RANGES[cpu].start;
+        }
+    }
+    panic!("Requested address is not accessible by the DMA controller: 0x{addr:X}");
+}
+
+/// Converts an address from the perspective of the DMA controller to a virtual
+/// address.
+///
+/// * `addr`: Address to convert.
+///
+///
+/// Returns the converted address.
+///
+/// Panics if the requested address is not within the ranges of the DMA
+/// controller.
+#[cfg(not(test))]
+#[track_caller]
+fn from_dma(addr: usize) -> usize
+{
+    if DMA_UNCACHED_RANGE.contains(&addr) {
+        return addr - DMA_UNCACHED_RANGE.start + UNCACHED_RANGE.start;
+    }
+    if DMA_CACHED_RANGE.contains(&addr) {
+        return addr - DMA_CACHED_RANGE.start + CACHED_RANGE.start;
+    }
+    if DMA_PERRY_RANGE.contains(&addr) {
+        return addr - DMA_PERRY_RANGE.start + PERRY_RANGE.start;
+    }
+    if DMA_VIDEO_RANGE.contains(&addr) {
+        return addr - DMA_VIDEO_RANGE.start + VIDEO_RANGE.start;
+    }
+    for cpu in 0 .. CPU_COUNT {
+        if DMA_STACK_RANGES[cpu].contains(&addr) {
+            return addr - DMA_STACK_RANGES[cpu].start + STACK_RANGES[cpu].start;
+        }
+    }
+    panic!("Requested address is not within any of the DMA controller's ranges: 0x{addr:X}");
+}
+
+/// Invalidates the cache associated to the specified data to point of
+/// coherence, effectively purging the data object from cache without writing it
+/// out to memory.  Other objects sharing the same initial or final cache lines
+/// as the object being purged will have their contents restored at the end of
+/// this operation.
+///
+/// * `data`: Data object to purge from cache.
+#[cfg(not(test))]
+fn invalidate_cache<T: Copy>(data: &mut T)
+{
+    let size = size_of_val(data);
+    if size == 0 {
+        return;
+    }
+    let start = data as *mut T as usize;
+    let end = data as *mut T as usize + size;
+    let algn_start = start & !(CACHELINE_SIZE - 1);
+    let algn_end = (end + (CACHELINE_SIZE - 1)) & !(CACHELINE_SIZE - 1);
+    // Save the first and last cache lines.
+    let start_cl = unsafe { *(algn_start as *const [u8; CACHELINE_SIZE]) };
+    let end_cl = unsafe { *((algn_end - CACHELINE_SIZE) as *const [u8; CACHELINE_SIZE]) };
+    // Invalidate the cache.
+    compiler_fence(Ordering::Release);
+    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
+    for addr in (algn_start .. algn_end).step_by(CACHELINE_SIZE) {
+        unsafe { asm!("dc ivac, {addr}", addr = in (reg) addr, options (preserves_flags)) };
+    }
+    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
+    compiler_fence(Ordering::Acquire);
+    // Restore the parts of the first and last cachelines shared with this data
+    // object.
+    if algn_start != start {
+        let count = start - algn_start;
+        unsafe {
+            (algn_start as *mut u8).copy_from_nonoverlapping(&start_cl[0], count);
+        }
+    }
+    if algn_end != end {
+        let count = algn_end - end;
+        let idx = CACHELINE_SIZE - count;
+        unsafe {
+            (end as *mut u8).copy_from_nonoverlapping(&end_cl[idx], count);
+        }
+    }
+}
+
+/// Cleans up the cache associated to the specified data object, effectively
+/// flushing its contents to main memory.
+///
+/// * `data`: Data object to flush.
+#[cfg(not(test))]
+fn cleanup_cache<T: Copy>(data: &T)
+{
+    let start = data as *const T as usize & !(CACHELINE_SIZE - 1);
+    let end = (data as *const T as usize + size_of_val(data) + (CACHELINE_SIZE - 1)) & !(CACHELINE_SIZE - 1);
+    compiler_fence(Ordering::Release);
+    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
+    for addr in (start .. end).step_by(CACHELINE_SIZE) {
+        unsafe { asm!("dc cvac, {addr}", addr = in (reg) addr, options (nomem, nostack, preserves_flags)) };
+    }
+    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
 }
 
 /// Returns the ID of the current CPU core.

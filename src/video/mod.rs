@@ -16,18 +16,16 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::mem::{align_of, size_of_val};
 use core::pin::Pin;
-use core::ptr::null_mut;
 use core::simd::u32x4;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
 pub use self::geom::*;
 use crate::math::{Color, Matrix, Projector, Triangulation, Vector};
-use crate::mbox::{Request, RequestProperty, ResponseProperty, MBOX};
 use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
 use crate::sync::{Lazy, Lock, RwLock};
-use crate::CPU_COUNT;
+use crate::{from_dma, mbox, CPU_COUNT};
 
 /// Screen width.
 const SCREEN_WIDTH: usize = 800;
@@ -37,6 +35,18 @@ const SCREEN_HEIGHT: usize = 480;
 const TILE_WIDTH: usize = 16;
 /// Tile height.
 const TILE_HEIGHT: usize = 16;
+/// Allocate frame buffer property tag.
+const ALLOC_FB_TAG: u32 = 0x40001;
+/// Set physical display dimensions property tag.
+const SET_DIM_TAG: u32 = 0x48003;
+/// Set virtual display dimensions property tag.
+const SET_VDIM_TAG: u32 = 0x48004;
+/// Set color depth property tag.
+const SET_DEPTH_TAG: u32 = 0x48005;
+/// Get horizontal pitch property tag.
+const GET_PITCH_TAG: u32 = 0x40008;
+/// Set position inside the virtual buffer property tag.
+const SET_POS_TAG: u32 = 0x48009;
 
 /// Global video driver instance.
 pub static VIDEO: Lazy<Video> = Lazy::new(Video::new);
@@ -47,12 +57,6 @@ pub struct Video
 {
     /// Frame buffer base.
     base: *mut u32x4,
-    /// Frame buffer size in bytes.
-    size: usize,
-    /// Display width.
-    width: usize,
-    /// Display height.
-    height: usize,
     /// Horizontal pitch.
     pitch: usize,
     /// Frame counter.
@@ -104,43 +108,47 @@ impl Video
     /// Returns the newly created instance.
     fn new() -> Self
     {
-        let mut req = Request::new();
-        req.push(RequestProperty::SetPhysicalSize { width: SCREEN_WIDTH,
-                                                    height: SCREEN_HEIGHT });
-        req.push(RequestProperty::SetVirtualSize { width: SCREEN_WIDTH,
-                                                   height: SCREEN_HEIGHT * 2 });
-        req.push(RequestProperty::SetDepth { bits: 32 });
-        req.push(RequestProperty::GetPitch);
-        req.push(RequestProperty::Allocate { align: align_of::<u32x4>() });
-        let resp = MBOX.exchange(req);
-        let mut this = Self { base: null_mut(),
-                              size: 0,
-                              width: 0,
-                              height: 0,
-                              pitch: 0,
-                              frame: AtomicU64::new(0),
-                              did_commit: AtomicBool::new(false),
-                              tile: AtomicUsize::new(0),
-                              waiters: Lock::new(Vec::new()),
-                              cmds: RwLock::new(Vec::new()) };
-        for prop in resp {
-            match prop {
-                ResponseProperty::Allocate { base, size } => {
-                    this.base = base.cast();
-                    this.size = size;
-                }
-                ResponseProperty::SetPhysicalSize { width, height } => {
-                    this.width = width;
-                    this.height = height;
-                }
-                ResponseProperty::GetPitch { pitch } => {
-                    this.pitch = pitch;
-                }
-                _ => continue,
-            }
-        }
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        struct Dim(u32, u32);
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug)]
+        struct AllocOut(u32, u32);
+        let dim_in = Dim(SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32);
+        let vdim_in = Dim(SCREEN_WIDTH as u32, 2 * SCREEN_HEIGHT as u32);
+        let depth_in = 32u32;
+        let alloc_in = align_of::<u32x4>() as u32;
+        let dim_out: Dim;
+        let vdim_out: Dim;
+        let depth_out: u32;
+        let pitch_out: u32;
+        let alloc_out: AllocOut;
+        mbox! {
+            SET_DIM_TAG: dim_in => dim_out,
+            SET_VDIM_TAG: vdim_in => vdim_out,
+            SET_DEPTH_TAG: depth_in => depth_out,
+            GET_PITCH_TAG: _ => pitch_out,
+            ALLOC_FB_TAG: alloc_in => alloc_out,
+        };
+        assert!(dim_out == dim_in,
+                "Returned and requested display dimensions do not match");
+        assert!(vdim_out == vdim_in,
+                "Returned and requested virtual display dimensions do not match");
+        assert!(depth_out == depth_in, "Returned and requested depths do not match");
+        assert!(pitch_out > 0, "Invalid pitch");
+        let base = alloc_out.0 as usize;
+        let base = from_dma(base);
+        let size = alloc_out.1 as usize;
+        assert!(size >= SCREEN_WIDTH * SCREEN_HEIGHT * 4,
+                "Frame buffer size does not meet the minimum requirement for its dimensions");
         PIXVALVE.register_vsync(Self::vsync);
-        this
+        Self { base: base as _,
+               pitch: pitch_out as usize,
+               frame: AtomicU64::new(0),
+               did_commit: AtomicBool::new(false),
+               tile: AtomicUsize::new(0),
+               waiters: Lock::new(Vec::new()),
+               cmds: RwLock::new(Vec::new()) }
     }
 
     /// Adds a draw command to the queue.
@@ -194,7 +202,7 @@ impl Video
         let base = if self.frame.load(Ordering::Relaxed) & 0x1 == 0 {
             unsafe {
                 self.base
-                    .add(self.height * self.pitch / size_of_val(self.base.as_ref().unwrap()))
+                    .add(SCREEN_HEIGHT * self.pitch / size_of_val(self.base.as_ref().unwrap()))
             }
         } else {
             self.base
@@ -204,7 +212,7 @@ impl Video
         let th = TILE_HEIGHT as f32;
         loop {
             let tile = self.tile.fetch_add(1, Ordering::Relaxed);
-            if tile >= self.width * self.height / (TILE_WIDTH * TILE_HEIGHT) {
+            if tile >= SCREEN_WIDTH * SCREEN_HEIGHT / (TILE_WIDTH * TILE_HEIGHT) {
                 fence(Ordering::Release);
                 return;
             }
@@ -212,7 +220,7 @@ impl Video
             for cmd in cmds.iter() {
                 let mut tris = cmd.tris.iter().fuse();
                 let proj = cmd.proj
-                              .for_tile(self.width, self.height, TILE_WIDTH, TILE_HEIGHT, tile)
+                              .for_tile(SCREEN_WIDTH, SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT, tile)
                               .for_view(cmd.view);
                 while let (Some(vert0), Some(vert1), Some(vert2)) = (tris.next(), tris.next(), tris.next()) {
                     let (vert0p, vert1p, vert2p) =
@@ -234,8 +242,8 @@ impl Video
                     }
                 }
             }
-            let col = tile * TILE_WIDTH % self.width;
-            let row = (self.height - TILE_HEIGHT) - tile * TILE_WIDTH / self.width * TILE_HEIGHT;
+            let col = tile * TILE_WIDTH % SCREEN_WIDTH;
+            let row = (SCREEN_HEIGHT - TILE_HEIGHT) - tile * TILE_WIDTH / SCREEN_WIDTH * TILE_HEIGHT;
             let offset = row * self.pitch + col * 4;
             let base = unsafe { base.add(offset / size_of_val(base.as_ref().unwrap())) };
             for row in 0 .. TILE_HEIGHT {
@@ -261,10 +269,14 @@ impl Video
         }
         let frame = VIDEO.frame.fetch_add(1, Ordering::Relaxed);
         if frame != 0 {
-            let mut req = Request::new();
-            req.push(RequestProperty::SetPosition { x: 0,
-                                                    y: VIDEO.height * (frame & 1) as usize });
-            MBOX.exchange(req);
+            #[repr(C)]
+            #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+            struct Pos(u32, u32);
+            let y = (SCREEN_HEIGHT * (frame as usize & 0x1)) as _;
+            let pos_in = Pos(0, y);
+            let pos_out: Pos;
+            mbox! {SET_POS_TAG: pos_in => pos_out};
+            assert!(pos_out == pos_in, "Returned and requested positions do not match");
         }
         VIDEO.did_commit.store(false, Ordering::SeqCst);
         let mut waiters = VIDEO.waiters.lock();

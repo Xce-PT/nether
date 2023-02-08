@@ -9,11 +9,11 @@ use core::cmp::min;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::alloc::{Alloc, DMA};
+use crate::alloc::{Alloc, UNCACHED_REGION};
 use crate::math::{Normal, Quaternion, Scalar, Vector};
-use crate::mbox::{Request, RequestProperty, MBOX};
 use crate::pixvalve::PIXVALVE;
 use crate::sync::{Lazy, Lock, RwLock};
+use crate::{mbox, to_dma};
 
 /// Maximum number of touch points tracked by the video core.
 const MAX_POINTS: usize = 10;
@@ -23,12 +23,14 @@ const INVALID_POINTS: u8 = 99;
 const WIDTH: i16 = 800;
 /// Touch sensor's height.
 const HEIGHT: i16 = 480;
+/// Set touch buffer property tag.
+const SET_TOUCHBUF_TAG: u32 = 0x4801F;
 
 /// Global touchscreen driver instance.
 pub static TOUCH: Lazy<Touch> = Lazy::new(Touch::new);
 
-/// DMA allocator instance.
-static DMA_ALLOC: Alloc<0x10> = Alloc::with_region(&DMA);
+/// Uncached memory allocator instance.
+static UNCACHED: Alloc<0x10> = Alloc::with_region(&UNCACHED_REGION);
 
 /// Touchscreen driver.
 #[derive(Debug)]
@@ -97,10 +99,9 @@ impl Touch
         #[allow(clippy::uninit_assumed_init)] // Same as above.
         let mut state = unsafe { MaybeUninit::<State>::uninit().assume_init() };
         state.points_len = INVALID_POINTS;
-        let mut state = Box::new_in(state, DMA_ALLOC);
-        let mut req = Request::new();
-        req.push(RequestProperty::SetTouchBuffer { buf: state.as_mut() as *mut State as _ });
-        MBOX.exchange(req);
+        let state = Box::new_in(state, UNCACHED);
+        let addr_in = to_dma(state.as_ref() as *const State as usize) as u32;
+        mbox! {SET_TOUCHBUF_TAG: addr_in => _};
         let saved = None;
         PIXVALVE.register_vsync(Self::poll);
         Self { state: Lock::new(state),
