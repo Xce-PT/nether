@@ -1,7 +1,7 @@
 #!/bin/sh
 
 if test -z "`which rustc`" -o -z "`rustc +nightly -V 2>/dev/null`"; then
-    echo "Nightly Rust does not appear to be properly installed."
+    echo "Nightly Rust does not appear to be properly installed." >&2
     exit 1
 fi
 
