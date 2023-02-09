@@ -234,7 +234,7 @@ fn panic(info: &PanicInfo) -> !
     uart.write_char('\n').unwrap();
     drop(uart);
     backtrace();
-    IRQ.trigger(HALT_IRQ);
+    IRQ.notify_others(HALT_IRQ);
     halt();
 }
 

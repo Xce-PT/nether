@@ -106,7 +106,7 @@ impl Scheduler
         let state = Arc::new(Lock::new(state));
         self.running.lock().insert(id, state.clone());
         self.scheduled.lock().push_back(state);
-        IRQ.trigger(SCHED_IRQ);
+        IRQ.notify_self(SCHED_IRQ);
         JoinHandle::new(rx)
     }
 
@@ -122,7 +122,7 @@ impl Scheduler
                        .clone();
         if !task.lock().activate() {
             self.scheduled.lock().push_back(task);
-            IRQ.trigger(SCHED_IRQ);
+            IRQ.notify_self(SCHED_IRQ);
         }
     }
 
@@ -131,7 +131,7 @@ impl Scheduler
     {
         let mut scheduled = SCHED.scheduled.lock();
         let task = scheduled.pop_front();
-        let is_empty = scheduled.is_empty();
+        let count = scheduled.len();
         drop(scheduled);
         if let Some(task) = task {
             let mut task = task.lock();
@@ -139,8 +139,10 @@ impl Scheduler
             if finished {
                 SCHED.running.lock().remove(&task.id());
             }
-            if !is_empty {
-                IRQ.trigger(SCHED_IRQ);
+            match count {
+                0 => (),
+                1 => IRQ.notify_self(SCHED_IRQ),
+                _ => IRQ.notify_all(SCHED_IRQ),
             }
         }
     }

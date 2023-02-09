@@ -1,4 +1,4 @@
-//! Generic Interrupt Controller (GIC) 400 driver.
+//! Generic Interrupt Controller (GIC) 400) driver.
 //!
 //! Documentation:
 //!
@@ -100,14 +100,44 @@ impl Irq
         unsafe { write_volatile((*GICD_ISENABLER).get_mut(idx).unwrap(), val) };
     }
 
-    /// Raises the specified Software Generated Interrupt on all cores.
+    /// Raises the specified Software Generated Interrupt on all CPUs.
     ///
     /// * `irq`: IRQ to raise.
-    pub fn trigger(&self, irq: u32)
+    ///
+    /// Panics if an attempt is made to raise an IRQ of any other kind.
+    pub fn notify_all(&self, irq: u32)
     {
         assert!(irq < 16,
                 "Attempted to trigger a Software Generated Interrupt outside of the valid range");
-        let val = 0xFF8000 | irq; // Target all cores.
+        let val = 0xFF8000 | irq; // Target all CPUs.
+        unsafe { GICD_SGIR.write_volatile(val) };
+    }
+
+    /// Raises a Software Generated Interrupt on all CPUs except the one that is
+    /// calling this function.
+    ///
+    /// * `irq`: IRQ to raise.
+    ///
+    /// Panics if an attempt is made to raise an IRQ of any other kind.
+    pub fn notify_others(&self, irq: u32)
+    {
+        assert!(irq < 16,
+                "Attempted to trigger a Software Generated Interrupt outside of the valid range");
+        let val = 0x1008000 | irq; // Target this CPU.
+        unsafe { GICD_SGIR.write_volatile(val) };
+    }
+
+    /// Raises a Software Generated Interrupt on the same CPU that is calling
+    /// this function.
+    ///
+    /// * `irq`: IRQ to raise.
+    ///
+    /// Panics if an attempt is made to raise an IRQ of any other kind.
+    pub fn notify_self(&self, irq: u32)
+    {
+        assert!(irq < 16,
+                "Attempted to trigger a Software Generated Interrupt outside of the valid range");
+        let val = 0x2008000 | irq; // Target this CPU.
         unsafe { GICD_SGIR.write_volatile(val) };
     }
 
@@ -116,12 +146,12 @@ impl Irq
     {
         loop {
             let val = unsafe { GICC_IAR.read_volatile() };
-            fence(Ordering::SeqCst);
             let irq = val & 0x3FF; // Strip sender info from SGIs.
             if irq as usize >= IRQ_COUNT {
                 unsafe { asm!("msr daifclr, #0x3", "wfi", options(nomem, nostack, preserves_flags)) };
                 continue;
             }
+            fence(Ordering::SeqCst);
             let handler = *self.handlers
                                .rlock()
                                .get(&irq)
