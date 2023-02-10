@@ -1,7 +1,7 @@
 ENTRY(boot)
 
 MEMORY {
-    /* This value is purposefully kept small in order to warn me to change boot.s if the static regions grow too large. */
+    /* This value is purposefully kept small as a reminder to shrink the DMA region if the static regions grow too large. */
     ram : ORIGIN = 0x80000, LENGTH = 0x180000
 }
 
@@ -13,8 +13,6 @@ SECTIONS {
     .bss ALIGN(0x1000) : {*(.bss .bss.*)} > ram = 0
 }
 
-dma_start = 0x1000;
-dma_end = 0x80000;
 boot_start = ADDR(.text.boot);
 boot_end = boot_start + SIZEOF(.text.boot) + 0xfff & ~0xfff;
 text_start = ADDR(.text);
@@ -25,4 +23,7 @@ data_start = ADDR(.data);
 data_end = data_start + SIZEOF(.data) + 0xfff & ~0xfff;
 bss_start = ADDR(.bss);
 bss_end = bss_start + SIZEOF(.bss) + 0xfff & ~0xfff;
-stack_x4 = 2M;
+/* Reminder to update boot.s and main.rs if you change anything below. */
+dma_start = 0x200000;
+dma_end = 0x1800000;
+stack_x4 = 0x1800000;

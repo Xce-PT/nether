@@ -106,20 +106,13 @@ boot:
     adrp x1, static_detail_tt
     orr x1, x1, x3
     str x1, [x0]
-    adrp x0, dma_start
-    mov x1, x0
-    adrp x2, dma_end
-    sub x2, x2, x1
-    mov x3, #0x20 << 48
-    movk x3, #0x727
-    adrp x4, static_detail_tt
-    mov x5, #1 << 12
-    bl map
     adrp x0, boot_start
     mov x1, x0
     adrp x2, boot_end
     sub x2, x2, x1
     mov x3, #0x7a3
+    adrp x4, static_detail_tt
+    mov x5, #1 << 12
     bl map
     adrp x0, text_start
     mov x1, x0
@@ -163,6 +156,12 @@ boot:
     mov x2, #32 << 20
     movk x3, #0x725
     bl map
+    adrp x0, #96 << 20
+    adrp x1, dma_start
+    adrp x2, dma_end
+    sub x2, x2, x1
+    movk x3, #0x20, lsl #48
+    bl map
     // Map the EL0 stacks.
     adrp x0, stacks_tt
     add x0, x0, #0xfc8
@@ -186,7 +185,7 @@ boot:
     str x0, [x1, #0x8] // Core 1.
     str x0, [x1, #0x10] // Core 2.
     str x0, [x1, #0x18] // Core 3.
-    dmb sy
+    dsb sy
     sev
 0:
     // Configure and enable the MMu.

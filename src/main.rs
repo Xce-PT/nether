@@ -61,7 +61,7 @@ use self::video::{Triangle, VIDEO};
 
 /// uncached RANGE.
 #[cfg(not(test))]
-const UNCACHED_RANGE: Range<usize> = 0x1000 .. 0x80000;
+const UNCACHED_RANGE: Range<usize> = 0x86000000 .. 0x87600000;
 /// Cached range.
 #[cfg(not(test))]
 const CACHED_RANGE: Range<usize> = 0x40000000 .. 0x7C000000;
@@ -79,7 +79,7 @@ const STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xFFE00000 .. 0x100000000,
                                                  0xFF200000 .. 0xFF400000];
 /// Uncached range from the perspective of the DMA controller.
 #[cfg(not(test))]
-const DMA_UNCACHED_RANGE: Range<usize> = 0xC0001000 .. 0xC0080000;
+const DMA_UNCACHED_RANGE: Range<usize> = 0xC0200000 .. 0xC1800000;
 /// Cached range from the perspective of the DMA controller.
 #[cfg(not(test))]
 const DMA_CACHED_RANGE: Range<usize> = 0xC2000000 .. 0xCE000000;
@@ -91,10 +91,10 @@ const DMA_PERRY_RANGE: Range<usize> = 0x7C000000 .. 0x80000000;
 const DMA_VIDEO_RANGE: Range<usize> = 0xFE000000 .. 0x100000000;
 /// Stack ranges from the perspective of the DMA controller.
 #[cfg(not(test))]
-const DMA_STACK_RANGES: [Range<usize>; CPU_COUNT] = [0x800000 .. 0xA00000,
-                                                     0x600000 .. 0x800000,
-                                                     0x400000 .. 0x600000,
-                                                     0x200000 .. 0x400000];
+const DMA_STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xC1E00000 .. 0xC2000000,
+                                                     0xC1C00000 .. 0xC1E00000,
+                                                     0xC1A00000 .. 0xC1C00000,
+                                                     0xC1800000 .. 0xC1A00000];
 /// Logical CPU count.
 #[cfg(not(test))]
 const CPU_COUNT: usize = 4;
