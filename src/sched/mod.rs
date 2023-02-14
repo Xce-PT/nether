@@ -105,8 +105,15 @@ impl Scheduler
         let state = State::new(id, fut, tx);
         let state = Arc::new(Lock::new(state));
         self.running.lock().insert(id, state.clone());
-        self.scheduled.lock().push_back(state);
-        IRQ.notify_self(SCHED_IRQ);
+        let mut scheduled = self.scheduled.lock();
+        scheduled.push_back(state);
+        let count = scheduled.len();
+        drop(scheduled);
+        if count == 1 {
+            IRQ.notify_self(SCHED_IRQ);
+        } else {
+            IRQ.notify_all(SCHED_IRQ);
+        }
         JoinHandle::new(rx)
     }
 
@@ -121,8 +128,15 @@ impl Scheduler
                        .expect("Attempted to wake  up a non-existing task")
                        .clone();
         if !task.lock().activate() {
-            self.scheduled.lock().push_back(task);
-            IRQ.notify_self(SCHED_IRQ);
+            let mut scheduled = self.scheduled.lock();
+            scheduled.push_back(task);
+            let count = scheduled.len();
+            drop(scheduled);
+            if count == 1 {
+                IRQ.notify_self(SCHED_IRQ);
+            } else {
+                IRQ.notify_all(SCHED_IRQ);
+            }
         }
     }
 
