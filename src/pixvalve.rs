@@ -1,11 +1,19 @@
 //! Pixel valve driver.
 //!
-//! Pixel valves are intended to be driven by the Video Core so they are not officially documented, however they provide important event notifications such as when the vertical synchronization signal is sent on each port, and as such they are also important to software running on the ARM cores.  My source of information regarding these devices is the excellent work done by the community in reverse engineering the Video Core in the [VPU Open Firmware](https://github.com/librerpi/rpi-open-firmware) project.
+//! Pixel valves are intended to be driven by the Hardware Video Scaler so they
+//! are not officially documented, however they provide important event
+//! notifications such as when the vertical synchronization signal is sent on
+//! each port, and as such they are also important to software running on the
+//! ARM cores.  My source of information regarding these devices is the
+//! excellent work done by the community in reverse engineering the Video Core
+//! in the [VPU Open Firmware project [1][2].
+//!
+//! [1]: https://github.com/librerpi/rpi-open-firmware/blob/master/docs/pixelvalve.md
+//! [2]: https://github.com/librerpi/rpi-open-firmware/blob/master/docs/pixelvalve.txt
 
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::irq::IRQ;
 use crate::sync::{Lazy, Lock};
@@ -19,13 +27,14 @@ const PV1_BASE: usize = 0x2207000 + PERRY_RANGE.start;
 const PV1_INTEN: *mut u32 = (PV1_BASE + 0x24) as _;
 /// Pixel valve 1 status and acknowledgement register.
 const PV1_STAT: *mut u32 = (PV1_BASE + 0x28) as _;
-/// Pixel valve VSync interrupt enable flag.
+/// Pixel valve VSync interrupt flag.
 const PV_VSYNC: u32 = 0x10;
 
 /// Pixel valve 1 global driver instance.
 pub static PIXVALVE: Lazy<PixelValve> = Lazy::new(PixelValve::new);
 
 /// Pixel Valve driver.
+#[derive(Debug)]
 pub struct PixelValve
 {
     /// Vertical synchronization event handlers.
@@ -33,8 +42,6 @@ pub struct PixelValve
     /// Vertical synchronization event handlers scheduled to be added to the
     /// event handlers list.
     vsync_new_hdlrs: Lock<Vec<fn()>>,
-    /// Vertical synchronization event acknowledgement flag.
-    vsync_ack: AtomicBool,
 }
 
 impl PixelValve
@@ -51,8 +58,7 @@ impl PixelValve
             PV1_INTEN.write_volatile(evs | PV_VSYNC);
         }
         Self { vsync_hdlrs: Lock::new(Vec::new()),
-               vsync_new_hdlrs: Lock::new(Vec::new()),
-               vsync_ack: AtomicBool::new(false) }
+               vsync_new_hdlrs: Lock::new(Vec::new()) }
     }
 
     /// Schedules the registration of a handler for the vertical synchronization
@@ -64,21 +70,14 @@ impl PixelValve
         self.vsync_new_hdlrs.lock().push(hdlr);
     }
 
-    /// Acknowledges the reception of the last vertical synchronization event.
-    pub fn ack_vsync(&self)
-    {
-        self.vsync_ack.store(true, Ordering::Relaxed);
-    }
-
     /// Dispatches the vertical synchronization event to all the registered
     /// handlers.
     fn vsync()
     {
-        if unsafe { PV1_STAT.read_volatile() } & PV_VSYNC == 0 || !PIXVALVE.vsync_ack.load(Ordering::Relaxed) {
+        if unsafe { PV1_STAT.read_volatile() } & PV_VSYNC == 0 {
             return;
         }
         unsafe { PV1_STAT.write_volatile(PV_VSYNC) };
-        PIXVALVE.vsync_ack.store(false, Ordering::Relaxed);
         // Append all scheduled handlers to the handler list.  Doing it this way avoids
         // a potential deadlock if a handler tries to schedule another handler, and also
         // avoids unnecessary memory allocations and deallocations that would result
