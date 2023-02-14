@@ -61,16 +61,13 @@ use self::video::{Triangle, VIDEO};
 
 /// uncached RANGE.
 #[cfg(not(test))]
-const UNCACHED_RANGE: Range<usize> = 0x86000000 .. 0x87600000;
+const UNCACHED_RANGE: Range<usize> = 0x84000000 .. 0x85600000;
 /// Cached range.
 #[cfg(not(test))]
 const CACHED_RANGE: Range<usize> = 0x40000000 .. 0x7C000000;
 /// Peripherals range.
 #[cfg(not(test))]
 const PERRY_RANGE: Range<usize> = 0x80000000 .. 0x84000000;
-/// Video memory range.
-#[cfg(not(test))]
-const VIDEO_RANGE: Range<usize> = 0x84000000 .. 0x86000000;
 /// Stack ranges.
 #[cfg(not(test))]
 const STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xFFE00000 .. 0x100000000,
@@ -86,9 +83,6 @@ const DMA_CACHED_RANGE: Range<usize> = 0xC2000000 .. 0xCE000000;
 /// Peripherals range from the perspective of the DMA controller.
 #[cfg(not(test))]
 const DMA_PERRY_RANGE: Range<usize> = 0x7C000000 .. 0x80000000;
-/// Video memory from the perspective of the DMA controller.
-#[cfg(not(test))]
-const DMA_VIDEO_RANGE: Range<usize> = 0xFE000000 .. 0x100000000;
 /// Stack ranges from the perspective of the DMA controller.
 #[cfg(not(test))]
 const DMA_STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xC1E00000 .. 0xC2000000,
@@ -259,49 +253,12 @@ fn to_dma(addr: usize) -> usize
     if PERRY_RANGE.contains(&addr) {
         return addr - PERRY_RANGE.start + DMA_PERRY_RANGE.start;
     }
-    if VIDEO_RANGE.contains(&addr) {
-        return addr - VIDEO_RANGE.start + DMA_VIDEO_RANGE.start;
-    }
     for cpu in 0 .. CPU_COUNT {
         if STACK_RANGES[cpu].contains(&addr) {
             return addr - STACK_RANGES[cpu].start + DMA_STACK_RANGES[cpu].start;
         }
     }
-    panic!("Requested address is not accessible by the DMA controller: 0x{addr:X}");
-}
-
-/// Converts an address from the perspective of the DMA controller to a virtual
-/// address.
-///
-/// * `addr`: Address to convert.
-///
-///
-/// Returns the converted address.
-///
-/// Panics if the requested address is not within the ranges of the DMA
-/// controller.
-#[cfg(not(test))]
-#[track_caller]
-fn from_dma(addr: usize) -> usize
-{
-    if DMA_UNCACHED_RANGE.contains(&addr) {
-        return addr - DMA_UNCACHED_RANGE.start + UNCACHED_RANGE.start;
-    }
-    if DMA_CACHED_RANGE.contains(&addr) {
-        return addr - DMA_CACHED_RANGE.start + CACHED_RANGE.start;
-    }
-    if DMA_PERRY_RANGE.contains(&addr) {
-        return addr - DMA_PERRY_RANGE.start + PERRY_RANGE.start;
-    }
-    if DMA_VIDEO_RANGE.contains(&addr) {
-        return addr - DMA_VIDEO_RANGE.start + VIDEO_RANGE.start;
-    }
-    for cpu in 0 .. CPU_COUNT {
-        if DMA_STACK_RANGES[cpu].contains(&addr) {
-            return addr - DMA_STACK_RANGES[cpu].start + STACK_RANGES[cpu].start;
-        }
-    }
-    panic!("Requested address is not within any of the DMA controller's ranges: 0x{addr:X}");
+    panic!("Requested address is either not mapped or not accessible by the DMA controller: 0x{addr:X}");
 }
 
 /// Invalidates the cache associated to the specified data to point of

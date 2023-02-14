@@ -152,15 +152,11 @@ boot:
     adrp x4, perry_tt
     bl map
     mov x0, #64 << 20
-    mov x1, #0x3e << 24
-    mov x2, #32 << 20
-    movk x3, #0x725
-    bl map
-    adrp x0, #96 << 20
     adrp x1, dma_start
     adrp x2, dma_end
     sub x2, x2, x1
-    movk x3, #0x20, lsl #48
+    mov x3, #0x20 << 48
+    movk x3, #0x725
     bl map
     // Map the EL0 stacks.
     adrp x0, stacks_tt

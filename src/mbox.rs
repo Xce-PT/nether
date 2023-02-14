@@ -1,16 +1,17 @@
 //! Video core mailbox interface.
 //!
-//! Documentation:
+//! This driver is my interpretation of the message format and hardware
+//! interaction described in the official documentation [1][2][3].  A complete
+//! list of property tags can be found in the Linux kernel source [4].
 //!
-//! * [Accessing mailboxes](https://github.com/raspberrypi/firmware/wiki/Accessing-mailboxes)
-//! * [Mailboxes](https://github.com/raspberrypi/firmware/wiki/Mailboxes)
-//! * [Mailbox Property Interface](https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface)
-//!
-//! At the moment  everything seems to be done through the property interface, whose property tags are fully enumerated in the [Linux kernel source](https://github.com/raspberrypi/linux/blob/rpi-5.15.y/include/soc/bcm2835/raspberrypi-firmware.h).
+//! [1]: https://github.com/raspberrypi/firmware/wiki/Accessing-mailboxes
+//! [2]: https://github.com/raspberrypi/firmware/wiki/Mailboxes
+//! [3]: https://github.com/raspberrypi/firmware/wiki/Mailbox-property-interface
+//! [4]: https://github.com/raspberrypi/linux/blob/rpi-5.15.y/include/soc/bcm2835/raspberrypi-firmware.h
 
 use core::cmp::max;
 use core::hint::spin_loop;
-use core::mem::{align_of, align_of_val, size_of, size_of_val};
+use core::mem::{align_of, size_of, size_of_val};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 
 use crate::sync::{Lazy, Lock};
@@ -170,8 +171,15 @@ impl Mailbox
     /// Delivers the request and waits for a response.
     ///
     /// * `msg`: Message with the request on input and response on output.
+    ///
+    /// Panics if the message is not a request on input or a success response on
+    /// output.
+    #[track_caller]
     pub fn exchange(&mut self, msg: &mut Message)
     {
+        let code = unsafe { msg.header.code };
+        assert!(code == REQUEST_CODE,
+                "Attempted to deliver a message to the firmware that is not a request");
         let buf = unsafe { &mut msg.byte_view };
         while unsafe { OUTBOX_STATUS.read_volatile() } & FULL_STATUS != 0 {
             spin_loop()
@@ -184,6 +192,9 @@ impl Mailbox
         }
         unsafe { INBOX_DATA.read_volatile() }; // Don't care about this value, just reading it to empty the inbox.
         invalidate_cache(buf);
+        let code = unsafe { msg.header.code };
+        assert!(code == SUCCESS_CODE,
+                "Firmware reply contains an unexpected code: 0x{code:X}");
     }
 }
 
@@ -204,15 +215,11 @@ impl Message
     ///
     /// * `prop`: Property to add.
     ///
-    /// Panics if the property requires an alignment greater than 4 bytes,
-    /// pushing the property would overflow the message, or a property with the
-    /// same tag already exists in the message.
+    /// Panics if pushing the property would overflow the message or a property
+    /// with the same tag already exists in the message.
     #[track_caller]
     pub fn add_property<I: Copy, O: Copy>(&mut self, prop: &Property<I, O>)
     {
-        let align = align_of_val(prop);
-        assert!(align == 4,
-                "Unable to fulfill the alignment requirement of the supplied property: {align}");
         // Find the end tag.
         let mut idx = 8;
         while unsafe { self.int_view[idx / 4] } != END_TAG {
@@ -230,30 +237,30 @@ impl Message
         unsafe { self.int_view[(idx + 3) / 4] = END_TAG };
     }
 
-    /// Finds a property by its tag.
-    ///
-    /// * `tag`: Property tag to search for.
-    ///
-    /// Returns the property.
-    ///
-    /// Panics if there's no property with the specified tag in the message.
-    #[track_caller]
-    pub fn find_property<I: Copy, O: Copy>(&mut self, tag: u32) -> Property<I, O>
-    {
-        let align = align_of::<Property<I, O>>();
-        assert!(align == 4, "Unable to fulfill the data type's alignement requirement");
-        let code = unsafe { self.header.code };
-        assert!(code == SUCCESS_CODE,
-                "Message was either not parsed by the firmware or it returned an error (code: 0x{code:X})");
-        // Look for the requested tag.
-        let mut idx = 8;
-        while unsafe { self.int_view[idx / 4] } != tag {
-            assert!(unsafe { self.int_view[idx / 4] } != END_TAG,
-                    "Tag 0x{tag:X} not found in message");
-            idx += ((unsafe { self.int_view[idx / 4 + 1] } as usize + 0x3) & !0x3) + 12;
-        }
-        Property::from_bytes(unsafe { &self.byte_view[idx .. idx + size_of::<Property<I, O>>()] })
-    }
+    // Commenting this out to prevent dead code warnings as well as because this has
+    // been needed in the past and might be needed in the future.
+    // Finds a property by its tag.
+    //
+    // * `tag`: Property tag to search for.
+    //
+    // Returns the property.
+    //
+    // Panics if there's no property with the specified tag in the message.
+    // #[track_caller]
+    // pub fn find_property<I: Copy, O: Copy>(&mut self, tag: u32) -> Property<I, O>
+    // {
+    // let code = unsafe { self.header.code };
+    // assert!(code == SUCCESS_CODE,
+    // "Message was either not parsed by the firmware or it returned an error (code:
+    // 0x{code:X})"); Look for the requested tag.
+    // let mut idx = 8;
+    // while unsafe { self.int_view[idx / 4] } != tag {
+    // assert!(unsafe { self.int_view[idx / 4] } != END_TAG,
+    // "Tag 0x{tag:X} not found in message");
+    // idx += ((unsafe { self.int_view[idx / 4 + 1] } as usize + 0x3) & !0x3) + 12;
+    // }
+    // Property::from_bytes(unsafe { &self.byte_view[idx .. idx +
+    // size_of::<Property<I, O>>()] }) }
 }
 
 impl<I: Copy, O: Copy> Property<I, O>
@@ -264,8 +271,14 @@ impl<I: Copy, O: Copy> Property<I, O>
     /// * `payload`: Property payload.
     ///
     /// Returns the newly created property.
+    ///
+    /// Panics if the alignment of either request or response types is not
+    /// supported.
+    #[track_caller]
     pub fn new(tag: u32, payload: I) -> Self
     {
+        let align = align_of::<Self>();
+        assert!(align == 4, "Property has an unsupported alignment");
         let size = max(size_of::<I>(), size_of::<O>());
         let header = PropertyHeader { tag,
                                       buf_size: size as _,
@@ -274,17 +287,26 @@ impl<I: Copy, O: Copy> Property<I, O>
         Self { input }
     }
 
-    /// Creates and initializes a new property from its byte representation.
-    ///
-    /// * `bytes`: Byte representation of the property.
-    ///
-    /// Returns the newly created property.
-    fn from_bytes(bytes: &[u8]) -> Self
-    {
-        assert!(bytes.len() == size_of::<Self>(),
-                "Slice size doesn't match the property's size");
-        unsafe { *(bytes.as_ptr() as *const Self) }
-    }
+    // Commenting this out to prevent dead code warnings as well as because this has
+    // been needed in the past and might be needed in the future. Creates and
+    // initializes a new property from its byte representation.
+    //
+    // * `bytes`: Byte representation of the property.
+    //
+    // Returns the newly created property.
+    //
+    // Panics if the alignment of either the request or response types is not
+    // supported or the length of the slice doesn't match the size of the property
+    // being created. #[track_caller]
+    // fn from_bytes(bytes: &[u8]) -> Self
+    // {
+    // let align = align_of::<Self>();
+    // assert!(align == 4, "Property has an unsupported alignment");
+    // let size = size_of::<Self>();
+    // assert!(bytes.len() == size,
+    // "Slice size doesn't match the property's size");
+    // unsafe { *(bytes.as_ptr() as *const Self) }
+    // }
 
     /// Returns this property's tag.
     fn tag(&self) -> u32
@@ -292,24 +314,27 @@ impl<I: Copy, O: Copy> Property<I, O>
         unsafe { self.header.tag }
     }
 
-    /// Returns this property's payload and response size.
-    ///
-    /// Panics if this is not a response.
-    #[track_caller]
-    pub fn payload(&self) -> O
-    {
-        let resp_size = unsafe { self.header.resp_size };
-        let tag = unsafe { self.header.tag };
-        assert!(resp_size & 0x80000000 != 0,
-                "No response for property with tag 0x{tag:X}");
-        let tag = unsafe { self.header.tag };
-        let resp_size = resp_size & !0x80000000;
-        let buf_size = unsafe { self.header.buf_size };
-        assert!(resp_size <= buf_size,
-                "Response to tag 0x{tag:X} is truncated (capacity: {buf_size}, size: {resp_size})");
-        unsafe { self.output.payload }
-    }
+    // Commenting this out to prevent dead code warnings as well as because this has
+    // been needed in the past and might be needed in the future. Returns this
+    // property's payload.
+    //
+    // Panics if this is not a response.
+    // #[track_caller]
+    // pub fn payload(&self) -> O
+    // {
+    // let resp_size = unsafe { self.header.resp_size };
+    // let tag = unsafe { self.header.tag };
+    // assert!(resp_size & 0x80000000 != 0,
+    // "No response for property with tag 0x{tag:X}");
+    // let tag = unsafe { self.header.tag };
+    // let resp_size = resp_size & !0x80000000;
+    // let buf_size = unsafe { self.header.buf_size };
+    // assert!(resp_size <= buf_size,
+    // "Response to tag 0x{tag:X} is truncated (capacity: {buf_size}, size:
+    // {resp_size})"); unsafe { self.output.payload }
+    // }
 
+    /// Returns a byte representation of this property.
     fn bytes(&self) -> &[u8]
     {
         unsafe { slice_from_raw_parts(self as *const Self as *const u8, size_of::<Self>()) }
