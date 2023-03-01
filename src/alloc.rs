@@ -1,11 +1,15 @@
 //! First fit free list memory allocator.
 
+#[cfg(not(test))]
 use core::alloc::{AllocError, Allocator, GlobalAlloc, Layout};
+#[cfg(test)]
+use core::alloc::{AllocError, Layout};
 use core::cmp::{max, min};
 use core::ops::Range;
 use core::ptr::{null_mut, NonNull};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 
+#[cfg(not(test))]
 use crate::sync::Lock;
 #[cfg(not(test))]
 use crate::{CACHED_RANGE, UNCACHED_RANGE};
@@ -16,12 +20,13 @@ use crate::{CACHED_RANGE, UNCACHED_RANGE};
 pub static CACHED: Alloc<0x10> = Alloc::with_region(&CACHED_REGION);
 /// Cached region.
 #[cfg(not(test))]
-pub static CACHED_REGION: Lock<Region> = unsafe { Region::new(CACHED_RANGE) };
-/// DMA region.
+pub static CACHED_REGION: Lock<Region> = Lock::new(unsafe { Region::new(CACHED_RANGE) });
+/// Uncached region.
 #[cfg(not(test))]
-pub static UNCACHED_REGION: Lock<Region> = unsafe { Region::new(UNCACHED_RANGE) };
+pub static UNCACHED_REGION: Lock<Region> = Lock::new(unsafe { Region::new(UNCACHED_RANGE) });
 
 /// Free list allocator front-end.
+#[cfg(not(test))]
 #[derive(Clone, Copy, Debug)]
 pub struct Alloc<'a, const ALIGN: usize>
     where Self: ValidAlign
@@ -53,6 +58,7 @@ struct Fragment
     next: *mut Fragment,
 }
 
+#[cfg(not(test))]
 impl<'a, const ALIGN: usize> Alloc<'a, ALIGN> where Self: ValidAlign
 {
     /// Creates and initializes a new allocator front-end.
@@ -66,6 +72,7 @@ impl<'a, const ALIGN: usize> Alloc<'a, ALIGN> where Self: ValidAlign
     }
 }
 
+#[cfg(not(test))]
 unsafe impl<'a, const ALIGN: usize> GlobalAlloc for Alloc<'a, ALIGN> where Self: ValidAlign
 {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8
@@ -100,6 +107,7 @@ unsafe impl<'a, const ALIGN: usize> GlobalAlloc for Alloc<'a, ALIGN> where Self:
     }
 }
 
+#[cfg(not(test))]
 unsafe impl<'a, const ALIGN: usize> Allocator for Alloc<'a, ALIGN> where Self: ValidAlign
 {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>
@@ -131,9 +139,13 @@ unsafe impl<'a, const ALIGN: usize> Allocator for Alloc<'a, ALIGN> where Self: V
     }
 }
 
+#[cfg(not(test))]
 impl<'a> ValidAlign for Alloc<'a, 0x10> {}
+#[cfg(not(test))]
 impl<'a> ValidAlign for Alloc<'a, 0x40> {}
+#[cfg(not(test))]
 impl<'a> ValidAlign for Alloc<'a, 0x1000> {}
+#[cfg(not(test))]
 impl<'a> ValidAlign for Alloc<'a, 0x200000> {}
 
 impl Region
@@ -143,10 +155,9 @@ impl Region
     /// * `range`: The memory range covered by this region.
     ///
     /// Returns the created region.
-    const unsafe fn new(range: Range<usize>) -> Lock<Self>
+    const unsafe fn new(range: Range<usize>) -> Self
     {
-        let this = Self { range, head: None };
-        Lock::new(this)
+        Self { range, head: None }
     }
 
     /// Attempts to allocate memory with the specified layout.
@@ -211,6 +222,7 @@ impl Region
     ///
     /// * `base`: Base address of the memory to deallocate.
     /// * `layout`: Layout of the allocated memory.
+
     unsafe fn deallocate(&mut self, base: NonNull<u8>, layout: Layout)
     {
         let base = base.addr().get();
@@ -417,6 +429,9 @@ impl Region
     }
 }
 
+#[cfg(not(test))]
+unsafe impl Send for Region {}
+
 #[cfg(test)]
 mod tests
 {
@@ -466,12 +481,12 @@ mod tests
             Self { buf: [0xFF; 0x1000] }
         }
 
-        fn provide(&mut self, region: &Lock<Region>, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
+        fn provide(&mut self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
         {
             let mut offset = 0usize;
             let mut prev = null_mut::<Fragment>();
             let buf = self.buf.as_mut_ptr();
-            region.lock().head = Some(null_mut());
+            region.head = Some(null_mut());
             for frag in frags {
                 let frag = frag.start .. frag.end;
                 if frag.start >= frag.end {
@@ -493,7 +508,7 @@ mod tests
                     if !prev.is_null() {
                         (*prev).next = current;
                     } else {
-                        region.lock().head = Some(current);
+                        region.head = Some(current);
                     }
                     offset += frag.end - frag.start;
                     prev = current;
@@ -502,10 +517,10 @@ mod tests
             Ok(())
         }
 
-        fn validate(&self, region: &Lock<Region>, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
+        fn validate(&self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
         {
             let mut offset = 0usize;
-            let mut current = *region.lock().head.as_ref().unwrap();
+            let mut current = *region.head.as_ref().unwrap();
             let buf = self.buf.as_ptr();
             for frag in frags {
                 let frag = frag.start .. frag.end;
@@ -709,11 +724,12 @@ mod tests
     fn test_alloc(layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let region = unsafe { Region::new(buf.range()) };
-        let alloc = Alloc::<0x10>::with_region(&region);
-        buf.provide(&region, input).map_err(TestError::Input)?;
-        let base = unsafe { alloc.alloc(layout) as usize };
-        buf.validate(&region, output).map_err(TestError::Output)?;
+        let mut region = unsafe { Region::new(buf.range()) };
+        buf.provide(&mut region, input).map_err(TestError::Input)?;
+        let base = region.allocate(layout)
+                         .map(|base| base.as_mut_ptr())
+                         .unwrap_or(null_mut()) as usize;
+        buf.validate(&mut region, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }
@@ -725,12 +741,11 @@ mod tests
                     -> Result<(), TestError>
     {
         let mut buf = Buffer::new();
-        let region = unsafe { Region::new(buf.range()) };
-        let alloc = Alloc::<0x10>::with_region(&region);
-        buf.provide(&region, input).map_err(TestError::Input)?;
+        let mut region = unsafe { Region::new(buf.range()) };
+        buf.provide(&mut region, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
-        unsafe { alloc.dealloc(base as _, layout) };
-        buf.validate(&region, output).map_err(TestError::Output)?;
+        unsafe { region.deallocate(NonNull::new_unchecked(base as _), layout) };
+        buf.validate(&mut region, output).map_err(TestError::Output)?;
         Ok(())
     }
 
@@ -738,16 +753,28 @@ mod tests
                     -> Result<usize, TestError>
     {
         let mut buf = Buffer::new();
-        let region = unsafe { Region::new(buf.range()) };
-        let alloc = Alloc::<0x10>::with_region(&region);
-        buf.provide(&region, input).map_err(TestError::Input)?;
+        let mut region = unsafe { Region::new(buf.range()) };
+        buf.provide(&mut region, input).map_err(TestError::Input)?;
         let base = base + buf.range().start;
         let size = min(layout.size(), new_size);
         for offset in 0 .. size / 2 {
             unsafe { (base as *mut u16).add(offset).write(offset as _) }
         }
-        let base = unsafe { alloc.realloc(base as _, layout, new_size) as usize };
-        buf.validate(&region, output).map_err(TestError::Output)?;
+        let new_layout = Layout::from_size_align(new_size, layout.align()).unwrap();
+        let base = if new_size > layout.size() {
+            unsafe {
+                region.grow(NonNull::new_unchecked(base as _), layout, new_layout)
+                      .map(|base| base.as_mut_ptr())
+                      .unwrap_or(null_mut()) as usize
+            }
+        } else {
+            unsafe {
+                region.shrink(NonNull::new_unchecked(base as _), layout, new_layout)
+                      .map(|base| base.as_mut_ptr())
+                      .unwrap_or(null_mut()) as usize
+            }
+        };
+        buf.validate(&mut region, output).map_err(TestError::Output)?;
         if base == 0 {
             return Err(TestError::Full);
         }

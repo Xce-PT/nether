@@ -21,6 +21,7 @@ mod mbox;
 mod pixvalve;
 #[cfg(not(test))]
 mod sched;
+#[cfg(not(test))]
 mod sync;
 #[cfg(not(test))]
 mod touch;

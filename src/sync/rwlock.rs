@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::lock::Advisor;
+use super::Advisor;
 
 /// Read grant on the lock.
 #[derive(Debug)]
@@ -20,7 +20,7 @@ pub struct ReadGuard<'a, T: Send + Sync + ?Sized>
 
 /// Write grant on the lock.
 #[derive(Debug)]
-pub struct WriteGuard<'a, T: Send + Sync + ?Sized>
+pub struct WriteGuard<'a, T: ?Sized>
 {
     /// Lock which this guard grants exclusive access to.
     lock: &'a RwLock<T>,
@@ -30,7 +30,7 @@ pub struct WriteGuard<'a, T: Send + Sync + ?Sized>
 
 /// Read-write lock.
 #[derive(Debug)]
-pub struct RwLock<T: Send + Sync + ?Sized>
+pub struct RwLock<T: ?Sized>
 {
     /// Spin-lock.
     advisor: Advisor,
@@ -49,9 +49,9 @@ impl<'a, T: Send + Sync + ?Sized> ReadGuard<'a, T>
     /// Returns the newly created guard.
     fn new(lock: &'a RwLock<T>) -> Self
     {
-        unsafe { lock.advisor.lock() };
+        lock.advisor.lock();
         lock.share_count.fetch_add(1, Ordering::Relaxed);
-        unsafe { lock.advisor.unlock() };
+        lock.advisor.unlock();
         Self { lock,
                _data: PhantomData }
     }
@@ -75,25 +75,28 @@ impl<'a, T: Send + Sync + ?Sized> Drop for ReadGuard<'a, T>
     }
 }
 
-impl<'a, T: Send + Sync + ?Sized> WriteGuard<'a, T>
+impl<'a, T: ?Sized> WriteGuard<'a, T>
 {
     /// Creates and initializes a new write guard.
     ///
     /// * `lock`: Lock to grant exclusive access to.
     ///
     /// Returns the newly created guard.
+    ///
+    /// Panics if a deadlock condition is detected.
+    #[track_caller]
     fn new(lock: &'a RwLock<T>) -> Self
     {
         while lock.share_count.load(Ordering::Relaxed) != 0 {
             spin_loop();
         }
-        unsafe { lock.advisor.lock() };
+        lock.advisor.lock();
         Self { lock,
                _data: PhantomData }
     }
 }
 
-impl<'a, T: Send + Sync + ?Sized> Deref for WriteGuard<'a, T>
+impl<'a, T: ?Sized> Deref for WriteGuard<'a, T>
 {
     type Target = T;
 
@@ -103,7 +106,7 @@ impl<'a, T: Send + Sync + ?Sized> Deref for WriteGuard<'a, T>
     }
 }
 
-impl<'a, T: Send + Sync + ?Sized> DerefMut for WriteGuard<'a, T>
+impl<'a, T: ?Sized> DerefMut for WriteGuard<'a, T>
 {
     fn deref_mut(&mut self) -> &'a mut Self::Target
     {
@@ -111,15 +114,15 @@ impl<'a, T: Send + Sync + ?Sized> DerefMut for WriteGuard<'a, T>
     }
 }
 
-impl<'a, T: Send + Sync + ?Sized> Drop for WriteGuard<'a, T>
+impl<'a, T: ?Sized> Drop for WriteGuard<'a, T>
 {
     fn drop(&mut self)
     {
-        unsafe { self.lock.advisor.unlock() };
+        self.lock.advisor.unlock();
     }
 }
 
-impl<T: Send + Sync + ?Sized> RwLock<T>
+impl<T: ?Sized> RwLock<T>
 {
     /// Creates and initializes a new lock.
     ///
@@ -135,26 +138,30 @@ impl<T: Send + Sync + ?Sized> RwLock<T>
     }
 
     /// Non-exclusively locks access to the content, blocking execution if
-    /// another core is already exclusively accessing it.
+    /// another logical CPU is already exclusively accessing it.
     ///
     /// Returns a [`ReadGuard`] which allows shared immutable access to the
     /// content and holds the lock until dropped.
     pub fn rlock(&self) -> ReadGuard<T>
+        where T: Send + Sync
     {
         ReadGuard::new(self)
     }
 
     /// Exclusively locks access to the content, blocking execution if another
-    /// core is already accessing it.
+    /// logical CPU is already accessing it.
     ///
     /// Returns a [`WriteGuard`] which allows exclusive mutable access to the
     /// content and holds the lock until dropped.
+    ///
+    /// Panics if a deadlock condition is detected.
+    #[track_caller]
     pub fn wlock(&self) -> WriteGuard<T>
     {
         WriteGuard::new(self)
     }
 }
 
-unsafe impl<T: Send + Sync + ?Sized> Send for RwLock<T> {}
+unsafe impl<T: Send + ?Sized> Send for RwLock<T> {}
 
-unsafe impl<T: Send + Sync + ?Sized> Sync for RwLock<T> {}
+unsafe impl<T: Send + ?Sized> Sync for RwLock<T> {}
