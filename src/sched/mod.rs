@@ -65,7 +65,7 @@ struct Alarm
 }
 
 /// Type-erased task state.
-trait Task
+trait Task: Send
 {
     /// Returns the task's unique identifier.
     fn id(&self) -> u64;

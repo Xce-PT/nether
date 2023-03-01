@@ -1,17 +1,10 @@
 //! Locking primitives.
 
 use core::cell::UnsafeCell;
-#[cfg(not(test))]
-use core::hint::spin_loop;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
-#[cfg(test)]
-use core::sync::atomic::{AtomicBool, Ordering};
-#[cfg(not(test))]
-use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(not(test))]
-use crate::{cpu_id, CPU_COUNT};
+use super::Advisor;
 
 /// Lock guard whose lifetime determines how long the lock is held.
 #[derive(Debug)]
@@ -33,24 +26,6 @@ pub struct Lock<T: ?Sized>
     content: UnsafeCell<T>,
 }
 
-/// Lock advisor.
-#[cfg(not(test))]
-#[derive(Debug)]
-#[repr(align(64))] // Take up an entire cache line.
-pub struct Advisor
-{
-    /// The Logical CPU that currently holds the lock.
-    affinity: AtomicUsize,
-}
-
-/// Dummy lock advisor implementation for tests.
-#[cfg(test)]
-#[derive(Debug)]
-pub struct Advisor
-{
-    is_locked: AtomicBool,
-}
-
 impl<'a, T: ?Sized> Guard<'a, T>
 {
     /// Creates and initializes a new guard.
@@ -58,9 +33,12 @@ impl<'a, T: ?Sized> Guard<'a, T>
     /// * `lock`: Lock to be released when this guard is dropped.
     ///
     /// Returns the newly created guard.
+    ///
+    /// Panics if a deadlock condition is detected.
+    #[track_caller]
     fn new(lock: &'a Lock<T>) -> Self
     {
-        unsafe { lock.advisor.lock() };
+        lock.advisor.lock();
         Self { lock,
                _data: PhantomData }
     }
@@ -88,7 +66,7 @@ impl<'a, T: ?Sized> Drop for Guard<'a, T>
 {
     fn drop(&mut self)
     {
-        unsafe { self.lock.advisor.unlock() };
+        self.lock.advisor.unlock();
     }
 }
 
@@ -106,83 +84,20 @@ impl<T: ?Sized> Lock<T>
                content: UnsafeCell::new(content) }
     }
 
-    /// Locks access to the content, blocking execution if another core is
-    /// already accessing it.
+    /// Locks access to the content, blocking execution if another logical CPU
+    /// is already accessing it.
     ///
     /// Returns a [`Guard`] which allows access to the content and holds the
     /// lock until dropped.
+    ///
+    /// Panics if a deadlock condition is detected.
+    #[track_caller]
     pub fn lock(&self) -> Guard<T>
     {
         Guard::new(self)
     }
 }
 
-#[cfg(not(test))]
-impl Advisor
-{
-    /// Creates and initializes a new lock advisor.
-    ///
-    /// Returns the newly created lock advisor.
-    pub const fn new() -> Self
-    {
-        Self { affinity: AtomicUsize::new(CPU_COUNT) }
-    }
+unsafe impl<T: ?Sized + Send> Send for Lock<T> {}
 
-    /// Places a hold on the lock, blocking the logical CPU if another logical
-    /// CPU is already holding it.
-    ///
-    /// The caller must ensure that this is called before a critical section.
-    pub unsafe fn lock(&self)
-    {
-        let affinity = cpu_id();
-        assert!(self.affinity.load(Ordering::Relaxed) != affinity,
-                "Deadlock detected on core #{affinity}");
-        while self.affinity
-                  .compare_exchange_weak(CPU_COUNT, affinity, Ordering::SeqCst, Ordering::Relaxed)
-                  .is_err()
-        {
-            spin_loop()
-        }
-    }
-
-    /// Relinquishes the hold on a lock, unblocking another logical CPU that
-    /// intends to hold it.
-    ///
-    /// Panics if the lock is not held by this logical CPU.
-    ///
-    /// The caller must make sure to call this after being done with a critical
-    /// section.
-    pub unsafe fn unlock(&self)
-    {
-        let affinity = cpu_id();
-        assert!(affinity == self.affinity.load(Ordering::Relaxed),
-                "Core #{affinity} attempted to relinquish a lock that it doesn't hold");
-        self.affinity.store(CPU_COUNT, Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-impl Advisor
-{
-    pub const fn new() -> Self
-    {
-        Self { is_locked: AtomicBool::new(false) }
-    }
-
-    pub unsafe fn lock(&self)
-    {
-        assert!(!self.is_locked.load(Ordering::Relaxed), "Potential deadlock detected");
-        self.is_locked.store(true, Ordering::Relaxed);
-    }
-
-    pub unsafe fn unlock(&self)
-    {
-        assert!(self.is_locked.load(Ordering::Relaxed),
-                "Attempted to relinquish the hold on a lock that is not held");
-        self.is_locked.store(false, Ordering::Relaxed);
-    }
-}
-
-unsafe impl<T: ?Sized> Send for Lock<T> {}
-
-unsafe impl<T: ?Sized> Sync for Lock<T> {}
+unsafe impl<T: ?Sized + Send> Sync for Lock<T> {}

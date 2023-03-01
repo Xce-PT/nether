@@ -8,13 +8,13 @@
 use core::cell::UnsafeCell;
 use core::ops::Deref;
 
-use super::lock::Advisor as LockAdvisor;
+use super::Advisor;
 
 /// Lazy initializer for static values.
 pub struct Lazy<T: Send + Sync + 'static>
 {
     /// Lock advisor to prevent simultaneous initialization.
-    advisor: LockAdvisor,
+    advisor: Advisor,
     /// Initialization function.
     init: fn() -> T,
     /// Actual object to be lazily initialized.
@@ -30,7 +30,7 @@ impl<T: Send + Sync + 'static> Lazy<T>
     /// Returns the newly created lazy initializer.
     pub const fn new(init: fn() -> T) -> Self
     {
-        Self { advisor: LockAdvisor::new(),
+        Self { advisor: Advisor::new(),
                init,
                content: UnsafeCell::new(None) }
     }
@@ -42,9 +42,9 @@ impl<T: Send + Sync + 'static> Deref for Lazy<T>
 
     fn deref(&self) -> &T
     {
-        unsafe { self.advisor.lock() };
+        self.advisor.lock();
         let content = unsafe { (*self.content.get()).get_or_insert_with(self.init) };
-        unsafe { self.advisor.unlock() };
+        self.advisor.unlock();
         content
     }
 }
