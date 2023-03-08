@@ -14,8 +14,9 @@ use core::hint::spin_loop;
 use core::mem::{align_of, size_of, size_of_val};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 
+use crate::cpu::{cleanup_cache, invalidate_cache};
 use crate::sync::{Lazy, Lock};
-use crate::{cleanup_cache, invalidate_cache, to_dma, PERRY_RANGE};
+use crate::{to_dma, PERRY_RANGE};
 
 /// Assembles a buffer with the properties specified on input, sends it through
 /// the Mailbox interface, and populates the outputs with the returned

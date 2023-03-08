@@ -6,7 +6,7 @@
 use core::hint::spin_loop;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{cpu_id, CPU_COUNT};
+use crate::cpu::{id as cpu_id, COUNT as CPU_COUNT};
 
 /// Lock advisor.
 #[repr(align(64))] // Take up an entire cache line.
