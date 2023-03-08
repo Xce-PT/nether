@@ -13,6 +13,8 @@
 
 mod alloc;
 #[cfg(not(test))]
+mod clock;
+#[cfg(not(test))]
 mod cpu;
 #[cfg(not(test))]
 mod irq;
@@ -25,6 +27,8 @@ mod pixvalve;
 mod sched;
 #[cfg(not(test))]
 mod sync;
+#[cfg(not(test))]
+mod timer;
 #[cfg(not(test))]
 mod touch;
 #[cfg(not(test))]
@@ -47,13 +51,15 @@ use core::panic::PanicInfo;
 use core::write;
 
 #[cfg(not(test))]
-use self::cpu::{id as cpu_id, COUNT as CPU_COUNT};
+use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
 use self::math::{Matrix, Projector, Quaternion, Scalar, Vector};
 #[cfg(not(test))]
 use self::sched::SCHED;
+#[cfg(not(test))]
+use self::timer::TIMER;
 #[cfg(not(test))]
 use self::touch::Recognizer;
 #[cfg(not(test))]
@@ -107,6 +113,15 @@ pub extern "C" fn start() -> !
     debug!("Booted core #{affinity}");
     if affinity == 0 {
         IRQ.register(HALT_IRQ, || halt());
+        let load = || {
+            let (active, idle) = CPU_LOAD.report();
+            let load = active * 100 / (active + idle);
+            debug!("Load average: {load}%");
+            CPU_LOAD.reset();
+            true
+        };
+        CPU_LOAD.reset();
+        TIMER.schedule(10000, load);
         SCHED.spawn(ticker());
     }
     IRQ.dispatch()

@@ -4,8 +4,12 @@
 //! project.
 
 use core::arch::asm;
+use core::cmp::min;
 use core::mem::size_of_val;
 use core::sync::atomic::{compiler_fence, Ordering};
+
+use crate::clock::now;
+use crate::sync::Lock;
 
 /// Number of logical CPUs in the system.
 pub const COUNT: usize = 4;
@@ -13,13 +17,77 @@ pub const COUNT: usize = 4;
 /// Size of a cache line.
 const CACHELINE_SIZE: usize = 64;
 
+/// Global load monitor instance.
+pub static LOAD: Load = Load::new();
+
+/// Load monitor.
+#[derive(Debug)]
+pub struct Load
+{
+    vals: Lock<LoadValues>,
+}
+
+/// Load values.
+#[derive(Debug)]
+struct LoadValues
+{
+    /// Last reset time.
+    ref_time: u64,
+    /// Total idle time since last reset.
+    idle_time: u64,
+}
+
+impl Load
+{
+    /// Creates and initializes a new load monitor.
+    ///
+    /// Returns the newly created load monitor.
+    const fn new() -> Self
+    {
+        let vals = LoadValues { ref_time: 0,
+                                idle_time: 0 };
+        Self { vals: Lock::new(vals) }
+    }
+
+    /// Registers the duration of a logical CPU's last idle period, ignoring any
+    /// idle time before the last reset.
+    fn idle_since(&self, time: u64)
+    {
+        let mut vals = self.vals.lock();
+        let now = now();
+        let duration = min(now - time, now - vals.ref_time);
+        vals.idle_time += duration;
+    }
+
+    /// Returns the amount of active and idle time of all logical CPUs.
+    pub fn report(&self) -> (u64, u64)
+    {
+        let vals = self.vals.lock();
+        let now = now();
+        let duration = (now - vals.ref_time) * COUNT as u64;
+        let active = duration - vals.idle_time;
+        let idle = vals.idle_time;
+        (active, idle)
+    }
+
+    /// Resets the monitor.
+    pub fn reset(&self)
+    {
+        let mut vals = self.vals.lock();
+        vals.ref_time = now();
+        vals.idle_time = 0;
+    }
+}
+
 /// Hints the calling CPU to idle in a low power state until an IRQ is
 /// delivered.
 pub fn sleep()
 {
+    let start = now();
     unsafe {
         asm!("msr daifclr, #0x3", "wfi", options(nomem, nostack, preserves_flags));
     }
+    LOAD.idle_since(start);
 }
 
 /// Invalidates the cache associated with the specified data to point of
