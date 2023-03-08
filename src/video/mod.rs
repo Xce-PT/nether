@@ -31,11 +31,12 @@ use core::task::{Context, Poll, Waker};
 
 pub use self::geom::*;
 use crate::alloc::{Alloc, UNCACHED_REGION};
+use crate::cpu::COUNT as CPU_COUNT;
 use crate::math::{Color, Matrix, Projector, Triangulation, Vector};
 use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
 use crate::sync::{Lazy, Lock, RwLock};
-use crate::{mbox, to_dma, CPU_COUNT, PERRY_RANGE};
+use crate::{mbox, to_dma, PERRY_RANGE};
 
 /// Screen width in pixels.
 const SCREEN_WIDTH: usize = 800;

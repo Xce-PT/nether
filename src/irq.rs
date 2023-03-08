@@ -10,10 +10,10 @@
 extern crate alloc;
 
 use alloc::collections::BTreeMap;
-use core::arch::asm;
 use core::ptr::write_volatile;
 use core::sync::atomic::{fence, Ordering};
 
+use crate::cpu::sleep;
 use crate::sync::{Lazy, RwLock};
 use crate::PERRY_RANGE;
 
@@ -148,7 +148,7 @@ impl Irq
             let val = unsafe { GICC_IAR.read_volatile() };
             let irq = val & 0x3FF; // Strip sender info from SGIs.
             if irq as usize >= IRQ_COUNT {
-                unsafe { asm!("msr daifclr, #0x3", "wfi", options(nomem, nostack, preserves_flags)) };
+                sleep();
                 continue;
             }
             fence(Ordering::SeqCst);

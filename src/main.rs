@@ -13,6 +13,8 @@
 
 mod alloc;
 #[cfg(not(test))]
+mod cpu;
+#[cfg(not(test))]
 mod irq;
 mod math;
 #[cfg(not(test))]
@@ -37,16 +39,15 @@ use core::f32::consts::FRAC_PI_2;
 #[cfg(not(test))]
 use core::fmt::Write;
 #[cfg(not(test))]
-use core::mem::size_of_val;
 #[cfg(not(test))]
 use core::ops::Range;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
 #[cfg(not(test))]
-use core::sync::atomic::{compiler_fence, Ordering};
-#[cfg(not(test))]
 use core::write;
 
+#[cfg(not(test))]
+use self::cpu::{id as cpu_id, COUNT as CPU_COUNT};
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
@@ -90,12 +91,6 @@ const DMA_STACK_RANGES: [Range<usize>; CPU_COUNT] = [0xC1E00000 .. 0xC2000000,
                                                      0xC1C00000 .. 0xC1E00000,
                                                      0xC1A00000 .. 0xC1C00000,
                                                      0xC1800000 .. 0xC1A00000];
-/// Logical CPU count.
-#[cfg(not(test))]
-const CPU_COUNT: usize = 4;
-/// Size of a cache line.
-#[cfg(not(test))]
-const CACHELINE_SIZE: usize = 64;
 /// Software generated IRQ that halts the system.
 #[cfg(not(test))]
 const HALT_IRQ: u32 = 0;
@@ -260,84 +255,6 @@ fn to_dma(addr: usize) -> usize
         }
     }
     panic!("Requested address is either not mapped or not accessible by the DMA controller: 0x{addr:X}");
-}
-
-/// Invalidates the cache associated to the specified data to point of
-/// coherence, effectively purging the data object from cache without writing it
-/// out to memory.  Other objects sharing the same initial or final cache lines
-/// as the object being purged will have their contents restored at the end of
-/// this operation.
-///
-/// * `data`: Data object to purge from cache.
-#[cfg(not(test))]
-fn invalidate_cache<T: Copy>(data: &mut T)
-{
-    let size = size_of_val(data);
-    if size == 0 {
-        return;
-    }
-    let start = data as *mut T as usize;
-    let end = data as *mut T as usize + size;
-    let algn_start = start & !(CACHELINE_SIZE - 1);
-    let algn_end = (end + (CACHELINE_SIZE - 1)) & !(CACHELINE_SIZE - 1);
-    // Save the first and last cache lines.
-    let start_cl = unsafe { *(algn_start as *const [u8; CACHELINE_SIZE]) };
-    let end_cl = unsafe { *((algn_end - CACHELINE_SIZE) as *const [u8; CACHELINE_SIZE]) };
-    // Invalidate the cache.
-    compiler_fence(Ordering::Release);
-    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
-    for addr in (algn_start .. algn_end).step_by(CACHELINE_SIZE) {
-        unsafe { asm!("dc ivac, {addr}", addr = in (reg) addr, options (preserves_flags)) };
-    }
-    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
-    compiler_fence(Ordering::Acquire);
-    // Restore the parts of the first and last cachelines shared with this data
-    // object.
-    if algn_start != start {
-        let count = start - algn_start;
-        unsafe {
-            (algn_start as *mut u8).copy_from_nonoverlapping(&start_cl[0], count);
-        }
-    }
-    if algn_end != end {
-        let count = algn_end - end;
-        let idx = CACHELINE_SIZE - count;
-        unsafe {
-            (end as *mut u8).copy_from_nonoverlapping(&end_cl[idx], count);
-        }
-    }
-}
-
-/// Cleans up the cache associated to the specified data object, effectively
-/// flushing its contents to main memory.
-///
-/// * `data`: Data object to flush.
-#[cfg(not(test))]
-fn cleanup_cache<T: Copy>(data: &T)
-{
-    let start = data as *const T as usize & !(CACHELINE_SIZE - 1);
-    let end = (data as *const T as usize + size_of_val(data) + (CACHELINE_SIZE - 1)) & !(CACHELINE_SIZE - 1);
-    compiler_fence(Ordering::Release);
-    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
-    for addr in (start .. end).step_by(CACHELINE_SIZE) {
-        unsafe { asm!("dc cvac, {addr}", addr = in (reg) addr, options (nomem, nostack, preserves_flags)) };
-    }
-    unsafe { asm!("dsb sy", options(nomem, nostack, preserves_flags)) };
-}
-
-/// Returns the ID of the current CPU core.
-#[cfg(not(test))]
-fn cpu_id() -> usize
-{
-    let id: usize;
-    unsafe {
-        asm!(
-            "mrs {id}, mpidr_el1",
-            "and {id}, {id}, #0xff",
-            id = out (reg) id,
-            options (nomem, nostack, preserves_flags));
-    }
-    id
 }
 
 /// Sends the return addresses of all the function calls from this function all
