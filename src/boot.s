@@ -110,7 +110,7 @@ boot:
     mov x1, x0
     adrp x2, boot_end
     sub x2, x2, x1
-    mov x3, #0x7a3
+    mov x3, #0x4a3
     adrp x4, static_detail_tt
     mov x5, #1 << 12
     bl map
@@ -148,7 +148,7 @@ boot:
     mov x1, #0xfc << 24
     mov x2, #64 << 20
     mov x3, #0x30 << 48
-    movk x3, #0x729
+    movk x3, #0x429
     adrp x4, perry_tt
     bl map
     mov x0, #64 << 20
@@ -156,14 +156,14 @@ boot:
     adrp x2, dma_end
     sub x2, x2, x1
     mov x3, #0x20 << 48
-    movk x3, #0x725
+    movk x3, #0x425
     bl map
     // Map the EL0 stacks.
     adrp x0, stacks_tt
     add x0, x0, #0xfc8
     adrp x1, stack_x4
     mov x2, #0x20 << 48
-    movk x2, #0x721
+    movk x2, #0x421
     orr x3, x1, x2
     str x3, [x0], #0x10
     add x1, x1, #2 << 20

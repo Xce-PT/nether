@@ -172,8 +172,8 @@ impl ViewTileProjector
         let mut vec = vec.vec;
         vec[3] = 1.0;
         vec = mat_vec_mul(self.mat, vec);
-        let mut w = f32x4::splat(vec[3].recip());
-        w[3] = 1.0;
+        let w = f32x4::splat(vec[3].recip());
+        vec[3] = 1.0;
         vec *= w;
         ProjectedVector { vec }
     }
@@ -193,10 +193,10 @@ mod tests
         let tvproj = proj.for_tile(1920, 1080, 16, 18, 0).for_view(Matrix::default());
         let point = Vector::from_components(1920.0 / 1080.0 * -0.5 * FRAC_PI_6.tan(), -0.5 * FRAC_PI_6.tan(), -0.5);
         let res = tvproj.project(point);
-        assert!(is_roughly(res.vec, f32x4::from([-1.0, -1.0, 0.0, 0.5])));
+        assert!(is_roughly(res.vec, f32x4::from([-1.0, -1.0, 0.0, 2.0])));
         let tvproj = proj.for_tile(1920, 1080, 16, 18, 7199).for_view(Matrix::default());
         let point = Vector::from_components(1920.0 / 1080.0 * 2.0 * FRAC_PI_6.tan(), 2.0 * FRAC_PI_6.tan(), -2.0);
         let res = tvproj.project(point);
-        assert!(is_roughly(res.vec, f32x4::from([1.0, 1.0, 1.0, 2.0])));
+        assert!(is_roughly(res.vec, f32x4::from([1.0, 1.0, 1.0, 0.5])));
     }
 }

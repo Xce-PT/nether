@@ -23,9 +23,9 @@ mod geom;
 use alloc::vec::Vec;
 use core::alloc::{Allocator, Layout};
 use core::future::Future;
-use core::mem::align_of;
+use core::mem::{align_of, MaybeUninit};
 use core::pin::Pin;
-use core::simd::u32x4;
+use core::simd::u16x8;
 use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
@@ -43,15 +43,15 @@ const SCREEN_WIDTH: usize = 800;
 /// Screen height in pixels.
 const SCREEN_HEIGHT: usize = 480;
 /// Pixel depth in bytes.
-const DEPTH: usize = 4;
+const DEPTH: usize = 2;
 /// Horizontal pitch in bytes.
 const PITCH: usize = SCREEN_WIDTH * DEPTH;
 /// Vertical pitch in rows.
 const VPITCH: usize = 1;
 /// Tile width in pixels (must be multiple of 16 / DEPTH).
-const TILE_WIDTH: usize = 16;
+const TILE_WIDTH: usize = 32;
 /// Tile height in pixels.
-const TILE_HEIGHT: usize = 16;
+const TILE_HEIGHT: usize = 32;
 /// Set plane property tag.
 const SET_PLANE_TAG: u32 = 0x48015;
 /// Hardware video scaler base address.
@@ -62,8 +62,8 @@ const HVS_DISPLIST0: *const u32 = (HVS_BASE + 0x20) as _;
 const HVS_DISPLIST_BUF: *mut u32 = (HVS_BASE + 0x4000) as _;
 /// Main LCD display ID.
 const LCD_DISP_ID: u8 = 0;
-/// Plane image type XRGB with 8 bits per channel setting.
-const IMG_XRGB8888_TYPE: u8 = 44;
+/// Plane image type RGB565 setting.
+const IMG_RGB565_TYPE: u8 = 1;
 /// Image transformation (bit0 = 180 degree rotation, bit 16 = X flip, bit 17 =
 /// Y flip).
 const IMG_TRANSFORM: u32 = 0x20000;
@@ -79,9 +79,9 @@ static UNCACHED: Alloc<0x10> = Alloc::with_region(&UNCACHED_REGION);
 pub struct Video
 {
     /// Frame buffer 0 base.
-    fb0: *mut u32x4,
+    fb0: *mut u16x8,
     /// Frame buffer 1 base.
-    fb1: *mut u32x4,
+    fb1: *mut u16x8,
     /// Frame counter.
     frame: AtomicU64,
     /// Whether this frame has been commited.
@@ -183,18 +183,18 @@ impl Video
     /// Returns the newly created instance.
     fn new() -> Self
     {
-        let layout = Layout::from_size_align(PITCH * VPITCH * SCREEN_HEIGHT, align_of::<u32x4>()).unwrap();
+        let layout = Layout::from_size_align(PITCH * VPITCH * SCREEN_HEIGHT, align_of::<u16x8>()).unwrap();
         let fb0 = UNCACHED.allocate_zeroed(layout)
                           .expect("Failed to allocate memory for the frame buffer")
                           .as_mut_ptr()
-                          .cast::<u32x4>();
+                          .cast::<u16x8>();
         let fb1 = UNCACHED.allocate_zeroed(layout)
                           .expect("Failed to allocate memory for the frame buffer")
                           .as_mut_ptr()
-                          .cast::<u32x4>();
+                          .cast::<u16x8>();
         let plane_in = SetPlaneProperty { display_id: LCD_DISP_ID,
                                           plane_id: 0,
-                                          img_type: IMG_XRGB8888_TYPE,
+                                          img_type: IMG_RGB565_TYPE,
                                           layer: 0,
                                           width: SCREEN_WIDTH as _,
                                           height: SCREEN_HEIGHT as _,
@@ -228,7 +228,6 @@ impl Video
     /// Adds a draw command to the queue.
     ///
     /// * `tris`: Triangles to draw.
-    /// * `lights`: Lights potentially illuminating the triangles.
     /// * `mdl`: Model to world transformation.
     /// * `cam`: Camera to world transformation.
     /// * `proj`: Projection transformation.
@@ -281,13 +280,17 @@ impl Video
         let cmds = self.cmds.rlock();
         let tw = TILE_WIDTH as f32;
         let th = TILE_HEIGHT as f32;
+        #[repr(align(64), C)]
+        struct Tile([Color; TILE_WIDTH * TILE_HEIGHT]);
+        let mut colors = MaybeUninit::<Tile>::uninit();
+        let colors = unsafe { colors.assume_init_mut() };
         loop {
             let tile = self.tile.fetch_add(1, Ordering::Relaxed);
             if tile >= SCREEN_WIDTH * SCREEN_HEIGHT / (TILE_WIDTH * TILE_HEIGHT) {
                 fence(Ordering::Release);
                 return;
             }
-            let mut colors = [Color::default(); TILE_WIDTH * TILE_HEIGHT];
+            colors.0.iter_mut().for_each(|color| *color = Color::default());
             for cmd in cmds.iter() {
                 let mut tris = cmd.tris.iter().fuse();
                 let proj = cmd.proj
@@ -307,7 +310,7 @@ impl Video
                             let point = Vector::from_components(x, y, 0.0);
                             if let Some(triang) = Triangulation::from_point_triangle(point, vert0p, vert1p, vert2p) {
                                 let color = triang.sample(vert0.color, vert1.color, vert2.color);
-                                colors[row * TILE_WIDTH + col].blend_with(color);
+                                colors.0[row * TILE_WIDTH + col] = color;
                             }
                         }
                     }
@@ -319,11 +322,15 @@ impl Video
             let base = unsafe { base.byte_add(offset) };
             for row in 0 .. TILE_HEIGHT {
                 for col in (0 .. TILE_WIDTH).step_by(unsafe { (*base).lanes() }) {
-                    let pix0 = colors[row * TILE_WIDTH + col].to_u32();
-                    let pix1 = colors[row * TILE_WIDTH + col + 1].to_u32();
-                    let pix2 = colors[row * TILE_WIDTH + col + 2].to_u32();
-                    let pix3 = colors[row * TILE_WIDTH + col + 3].to_u32();
-                    let pixgrp = u32x4::from([pix0, pix1, pix2, pix3]);
+                    let pix0 = colors.0[row * TILE_WIDTH + col].into_inner();
+                    let pix1 = colors.0[row * TILE_WIDTH + col + 1].into_inner();
+                    let pix2 = colors.0[row * TILE_WIDTH + col + 2].into_inner();
+                    let pix3 = colors.0[row * TILE_WIDTH + col + 3].into_inner();
+                    let pix4 = colors.0[row * TILE_WIDTH + col + 4].into_inner();
+                    let pix5 = colors.0[row * TILE_WIDTH + col + 5].into_inner();
+                    let pix6 = colors.0[row * TILE_WIDTH + col + 6].into_inner();
+                    let pix7 = colors.0[row * TILE_WIDTH + col + 7].into_inner();
+                    let pixgrp = u16x8::from([pix0, pix1, pix2, pix3, pix4, pix5, pix6, pix7]);
                     let offset = row * PITCH * VPITCH + col * DEPTH;
                     unsafe { base.byte_add(offset).write(pixgrp) };
                 }
