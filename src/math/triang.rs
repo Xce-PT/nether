@@ -59,9 +59,9 @@ impl Triangulation
         let bary0 = area0 / total;
         let bary1 = area1 / total;
         let bary2 = area2 / total;
-        let w0 = vert0[3].recip() * bary0;
-        let w1 = vert1[3].recip() * bary1;
-        let w2 = vert2[3].recip() * bary2;
+        let w0 = vert0[3] * bary0;
+        let w1 = vert1[3] * bary1;
+        let w2 = vert2[3] * bary2;
         let wp = (w0 + w1 + w2).recip();
         let z = (vert0[2] * w0 + vert1[2] * w1 + vert2[2] * w2) * wp;
         if !(0.0 ..= 1.0).contains(&z) {
@@ -99,9 +99,9 @@ mod tests
         let vert0 = Vector::from_components(-1.0, -1.0, -2.0);
         let vert1 = Vector::from_components(1.0, -1.0, -2.0);
         let vert2 = Vector::from_components(0.0, 1.0, -2.0);
-        let prvert0 = ProjectedVector { vec: f32x4::from([-0.5, -0.5, 1.0, 2.0]) };
-        let prvert1 = ProjectedVector { vec: f32x4::from([0.5, -0.5, 1.0, 2.0]) };
-        let prvert2 = ProjectedVector { vec: f32x4::from([0.0, 0.5, 1.0, 2.0]) };
+        let prvert0 = ProjectedVector { vec: f32x4::from([-0.5, -0.5, 1.0, 0.5]) };
+        let prvert1 = ProjectedVector { vec: f32x4::from([0.5, -0.5, 1.0, 0.5]) };
+        let prvert2 = ProjectedVector { vec: f32x4::from([0.0, 0.5, 1.0, 0.5]) };
         let point = Vector::from_components(0.0, -1.0 / 6.0, 0.0);
         let sampler = Triangulation::from_point_triangle(point, prvert0, prvert1, prvert2).unwrap();
         let res = sampler.sample(vert0, vert1, vert2);
@@ -116,7 +116,7 @@ mod tests
         let vert2 = Vector::from_components(0.0, -1.0, -2.0);
         let prvert0 = ProjectedVector { vec: f32x4::from([-1.0, -1.0, 0.0, 1.0]) };
         let prvert1 = ProjectedVector { vec: f32x4::from([1.0, -1.0, 0.0, 1.0]) };
-        let prvert2 = ProjectedVector { vec: f32x4::from([0.0, -0.5, 1.0, 2.0]) };
+        let prvert2 = ProjectedVector { vec: f32x4::from([0.0, -0.5, 1.0, 0.5]) };
         let point = Vector::from_components(0.0, -0.75, 0.0);
         let sampler = Triangulation::from_point_triangle(point, prvert0, prvert1, prvert2).unwrap();
         let res = sampler.sample(vert0, vert1, vert2);

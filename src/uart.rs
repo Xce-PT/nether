@@ -69,7 +69,7 @@ impl Uart
             let val = GPIO_PUPD0.read_volatile();
             GPIO_PUPD0.write_volatile(val & 0xFFFFFF); // Set neither pull-up nor pull-down state for GPIOs 14 and 15.
             AUX_MU_LCR.write_volatile(0x3); // Set data bits to 8 (the documentation is wrong).
-            AUX_MU_BAUD.write_volatile(250000000 / 115200 / 8 - 1); // Set the BAUD rate to 115200.
+            AUX_MU_BAUD.write_volatile(500000000 / 115200 / 8 - 1); // Set the BAUD rate to 115200.
             AUX_MU_CNTL.write_volatile(0x3); // Enable the transmitter and
                                              // receiver.
         }

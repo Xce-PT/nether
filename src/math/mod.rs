@@ -1,7 +1,6 @@
 //! Linear algebra math.
 
 mod angle;
-#[cfg(not(test))]
 mod color;
 mod mat;
 mod normal;
