@@ -5,7 +5,7 @@
 use core::f32::consts::FRAC_PI_3;
 
 use super::*;
-use crate::math::{Color, SoftFloatOps, Vector};
+use crate::math::{Angle, Vector};
 
 /// Linearly interpolated color triangle.
 #[derive(Debug)]
@@ -22,16 +22,16 @@ impl Triangle
     /// Returns the newly created triangle.
     pub fn new() -> Self
     {
-        let tan = FRAC_PI_3.tan();
-        let vert0 = Vector::from_components(-1.0, -tan / 3.0, 0.0);
-        let vert1 = Vector::from_components(1.0, -tan / 3.0, 0.0);
-        let vert2 = Vector::from_components(0.0, tan / 3.0 * 2.0, 0.0);
+        let tan = Angle::from(FRAC_PI_3).tan();
+        let vert0 = Vector::from([-1.0, -tan / 3.0, 0.0, 1.0]);
+        let vert1 = Vector::from([1.0, -tan / 3.0, 0.0, 1.0]);
+        let vert2 = Vector::from([0.0, tan / 3.0 * 2.0, 0.0, 1.0]);
         let vert0 = Vertex { pos: vert0,
-                             color: Color::RED };
+                             color: Vector::from([1.0, 0.0, 0.0, 1.0]) };
         let vert1 = Vertex { pos: vert1,
-                             color: Color::BLUE };
+                             color: Vector::from([0.0, 0.0, 1.0, 1.0]) };
         let vert2 = Vertex { pos: vert2,
-                             color: Color::GREEN };
+                             color: Vector::from([0.0, 1.0, 0.0, 1.0]) };
         let geom = [vert0, vert1, vert2, vert2, vert1, vert0];
         Self { geom }
     }

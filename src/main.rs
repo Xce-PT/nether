@@ -6,10 +6,10 @@
 #![feature(panic_info_message)]
 #![feature(pointer_byte_offsets)]
 #![feature(allocator_api)]
-#![feature(nonnull_slice_from_raw_parts)]
 #![feature(strict_provenance)]
 #![feature(slice_ptr_get)]
 #![feature(portable_simd)]
+#![feature(iter_array_chunks)]
 
 mod alloc;
 #[cfg(not(test))]
@@ -55,7 +55,7 @@ use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
-use self::math::{Matrix, Projector, Quaternion, Scalar, Vector};
+use self::math::{Angle, Transform, Quaternion, Vector};
 #[cfg(not(test))]
 use self::sched::SCHED;
 #[cfg(not(test))]
@@ -131,23 +131,23 @@ pub extern "C" fn start() -> !
 #[cfg(not(test))]
 async fn ticker() -> !
 {
-    let proj = Projector::perspective(FRAC_PI_2, 0.5, 4.0);
+    let fov = Angle::from(FRAC_PI_2);
     let tri = Triangle::new();
-    let cam = Matrix::default();
-    let pos = Vector::from_components(0.0, 0.0, -2.0);
+    let cam = Transform::default();
+    let pos = Vector::from([0.0, 0.0, -2.0, 1.0]);
     let mut rot = Quaternion::default();
-    let scale = Scalar::default();
+    let scale = 1.0;
     let mut recog = Recognizer::new();
     loop {
         recog.sample();
-        let vec0 = Vector::from_components(0.0, 0.0, 1.0);
+        let vec0 = Vector::from([0.0, 0.0, 1.0, 0.0]);
         let vec1 = recog.translated();
-        let axis = vec0.cross(vec0 + vec1);
-        let angle = vec1.length().to_angle();
-        rot = Quaternion::from_axis_angle(axis, angle) * rot;
-        rot = recog.rotated() * rot;
-        let mdl = Matrix::from_components(pos, rot, scale);
-        VIDEO.enqueue(tri.geom(), mdl, cam, proj);
+        let axis = vec0.cross_dot(vec0 + vec1);
+        let angle = Angle::from(vec1.length());
+        rot *= Quaternion::from_axis_angle(axis, angle);
+        rot *= recog.rotated();
+        let mdl = Transform::from_components(pos, rot, scale);
+        VIDEO.draw_triangles(tri.geom(), mdl, cam, fov);
         VIDEO.commit().await;
     }
 }

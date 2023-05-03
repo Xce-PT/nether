@@ -7,7 +7,7 @@
 #![feature(c_size_t)]
 
 use core::arch::asm;
-use core::ffi::{c_int, c_size_t, c_void};
+use core::ffi::{c_float, c_int, c_size_t, c_void};
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dst: *mut c_void, src: *const c_void, len: c_size_t) -> *mut c_void
@@ -76,4 +76,20 @@ pub unsafe extern "C" fn memset(buf: *mut c_void, val: c_int, len: c_size_t) -> 
         asm!("strb {val:w}, [{buf}], #1", val = in (reg) val, buf = inout (reg) buf, options (preserves_flags));
     }
     ret
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn fmodf(x: c_float, y: c_float) -> c_float {
+    let res: c_float;
+    asm!(
+        "fdiv {res:s}, {x:s}, {y:s}",
+        "frintz {res:s}, {res:s}",
+        "fmul {res:s}, {y:s}, {res:s}",
+        "fsub {res:s}, {x:s}, {res:s}",
+        x = in (vreg) x,
+        y = in (vreg) y,
+        res = out (vreg) res,
+        options (pure, nomem, nostack)
+    );
+    res
 }

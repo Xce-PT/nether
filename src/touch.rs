@@ -10,7 +10,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
-use crate::math::{Normal, Quaternion, Scalar, Vector};
+use crate::math::{Angle, Quaternion, Vector};
 use crate::pixvalve::PIXVALVE;
 use crate::sync::{Lazy, Lock, RwLock};
 use crate::{mbox, to_dma};
@@ -132,7 +132,7 @@ impl Touch
             let y = y * 2 - HEIGHT;
             let x = x as f32 / min(WIDTH, HEIGHT) as f32;
             let y = y as f32 / min(WIDTH, HEIGHT) as f32;
-            Vector::from_components(x, y, 0.0)
+            Vector::from([x, y, 0.0, 0.0])
         };
         let new = state.points.map(mapper);
         let new = (new[0], new[1]);
@@ -148,7 +148,7 @@ impl Recognizer
     pub fn new() -> Self
     {
         Self { saved: None,
-               trans: Vector::default(),
+               trans: Vector::from([0.0, 0.0, 0.0, 0.0]),
                rot: Quaternion::default() }
     }
 
@@ -171,7 +171,7 @@ impl Recognizer
             saved
         } else {
             self.saved = None;
-            self.trans = Vector::default();
+            self.trans = Vector::from([0.0, 0.0, 0.0, 0.0]);
             self.rot = Quaternion::default();
             return;
         };
@@ -179,8 +179,8 @@ impl Recognizer
         self.saved = Some(new);
         // Make sure that the points are in the same order as in the last poll by
         // verifying which are closest to which.
-        let sqdist0 = old.0.sq_distance(new.0);
-        let sqdist1 = old.0.sq_distance(new.1);
+        let sqdist0 = (old.0 - new.0).sq_length();
+        let sqdist1 = (old.0 - new.1).sq_length();
         let new = if sqdist0 <= sqdist1 {
             (new.0, new.1)
         } else {
@@ -188,14 +188,29 @@ impl Recognizer
         };
         // Compute the pivot of the two touch point samples, which is the middle point
         // between their two respective touch points.
-        let old_pivot = old.0.lerp(old.1, Scalar::from_val(0.5));
-        let new_pivot = new.0.lerp(new.1, Scalar::from_val(0.5));
+        let old_pivot = old.0.lerp(old.1, 0.5);
+        let new_pivot = new.0.lerp(new.1, 0.5);
         // Compute the translation, which is just the difference between the pivots.
         self.trans = new_pivot - old_pivot;
         // Compute the rotation by calculating the angle between the vectors created by
         // the difference between the two contacts in each sample.
-        let old = Normal::from_vec(old.1 - old.0);
-        let new = Normal::from_vec(new.1 - new.0);
-        self.rot = Quaternion::from_normals(old, new);
+        let old = old.1 - old.0;
+        let len = old.length();
+        if len == 0.0 {
+            self.rot = Quaternion::default();
+            return;
+        }
+        let old = old / len;
+        let new = new.1 - new.0;
+        let len = new.length();
+        if len == 0.0 {
+            self.rot = Quaternion::default();
+            return;
+        }
+        let new = new / len;
+        let axis = old.cross_dot(new);
+        let cos = axis[3];
+        let angle = Angle::from_cos(cos);
+        self.rot = Quaternion::from_axis_angle(axis, angle);
     }
 }

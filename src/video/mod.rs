@@ -18,25 +18,23 @@
 
 extern crate alloc;
 
+mod fb;
 mod geom;
 
 use alloc::vec::Vec;
-use core::alloc::{Allocator, Layout};
 use core::future::Future;
-use core::mem::{align_of, MaybeUninit};
 use core::pin::Pin;
-use core::simd::u16x8;
-use core::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::task::{Context, Poll, Waker};
 
+pub use self::fb::{FrameBuffer, Vertex as ProjectedVertex};
 pub use self::geom::*;
-use crate::alloc::{Alloc, UNCACHED_REGION};
 use crate::cpu::COUNT as CPU_COUNT;
-use crate::math::{Color, Matrix, Projector, Triangulation, Vector};
+use crate::math::{Angle, Transform, Projection, Vector};
 use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
 use crate::sync::{Lazy, Lock, RwLock};
-use crate::{mbox, to_dma, PERRY_RANGE};
+use crate::{mbox, PERRY_RANGE};
 
 /// Screen width in pixels.
 const SCREEN_WIDTH: usize = 800;
@@ -48,10 +46,6 @@ const DEPTH: usize = 2;
 const PITCH: usize = SCREEN_WIDTH * DEPTH;
 /// Vertical pitch in rows.
 const VPITCH: usize = 1;
-/// Tile width in pixels (must be multiple of 16 / DEPTH).
-const TILE_WIDTH: usize = 32;
-/// Tile height in pixels.
-const TILE_HEIGHT: usize = 32;
 /// Set plane property tag.
 const SET_PLANE_TAG: u32 = 0x48015;
 /// Hardware video scaler base address.
@@ -71,23 +65,15 @@ const IMG_TRANSFORM: u32 = 0x20000;
 /// Global video driver instance.
 pub static VIDEO: Lazy<Video> = Lazy::new(Video::new);
 
-/// DMA allocator.
-static UNCACHED: Alloc<0x10> = Alloc::with_region(&UNCACHED_REGION);
-
 /// Video driver.
-#[derive(Debug)]
 pub struct Video
 {
-    /// Frame buffer 0 base.
-    fb0: *mut u16x8,
-    /// Frame buffer 1 base.
-    fb1: *mut u16x8,
-    /// Frame counter.
-    frame: AtomicU64,
+    /// Frame buffer.
+    fb: FrameBuffer,
+    /// Current frame buffer address.
+    cfb: AtomicU32,
     /// Whether this frame has been commited.
     did_commit: AtomicBool,
-    /// Current tile index.
-    tile: AtomicUsize,
     /// VSync waiters.
     waiters: Lock<Vec<Waker>>,
     /// Command queue.
@@ -100,8 +86,8 @@ pub struct Vertex
 {
     /// Position.
     pos: Vector,
-    /// Color.
-    color: Color,
+    /// RGBA Color.
+    color: Vector,
 }
 
 /// Vertical sync future.
@@ -116,12 +102,8 @@ struct VerticalSync
 #[derive(Debug)]
 struct Command
 {
-    /// Triangle vertices.
-    tris: Vec<Vertex>,
-    /// View transformation.
-    view: Matrix,
-    /// Projection transformation.
-    proj: Projector,
+    /// Projected vertices.
+    proj: Vec<ProjectedVertex>,
 }
 
 /// Set plane property.
@@ -183,15 +165,8 @@ impl Video
     /// Returns the newly created instance.
     fn new() -> Self
     {
-        let layout = Layout::from_size_align(PITCH * VPITCH * SCREEN_HEIGHT, align_of::<u16x8>()).unwrap();
-        let fb0 = UNCACHED.allocate_zeroed(layout)
-                          .expect("Failed to allocate memory for the frame buffer")
-                          .as_mut_ptr()
-                          .cast::<u16x8>();
-        let fb1 = UNCACHED.allocate_zeroed(layout)
-                          .expect("Failed to allocate memory for the frame buffer")
-                          .as_mut_ptr()
-                          .cast::<u16x8>();
+        let fb = FrameBuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT);
+        let cfb = fb.vsync();
         let plane_in = SetPlaneProperty { display_id: LCD_DISP_ID,
                                           plane_id: 0,
                                           img_type: IMG_RGB565_TYPE,
@@ -212,49 +187,49 @@ impl Video
                                           num_planes: 1,
                                           is_vu: 0,
                                           color_encoding: 0,
-                                          planes: [to_dma(fb0 as _) as _, 0x0, 0x0, 0x0],
+                                          planes: [cfb, 0x0, 0x0, 0x0],
                                           transform: IMG_TRANSFORM };
         mbox! {SET_PLANE_TAG: plane_in => _};
         PIXVALVE.register_vsync(Self::vsync);
-        Self { fb0,
-               fb1,
-               frame: AtomicU64::new(0),
+        Self { fb, cfb: AtomicU32::new(cfb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32)),
                did_commit: AtomicBool::new(false),
-               tile: AtomicUsize::new(0),
                waiters: Lock::new(Vec::new()),
                cmds: RwLock::new(Vec::new()) }
     }
 
     /// Adds a draw command to the queue.
     ///
-    /// * `tris`: Triangles to draw.
-    /// * `mdl`: Model to world transformation.
+    /// * `verts`: Triangle vertices to draw.
     /// * `cam`: Camera to world transformation.
     /// * `proj`: Projection transformation.
-    pub fn enqueue(&self, tris: &[Vertex], mdl: Matrix, cam: Matrix, proj: Projector)
+    pub fn draw_triangles(&self, verts: &[Vertex], mdl: Transform, cam: Transform, fov: Angle)
     {
-        let view = cam.recip();
-        let mut ttris = Vec::with_capacity(tris.len());
-        for vert in tris {
-            let mut vert = *vert;
-            vert.pos = mdl * vert.pos;
-            ttris.push(vert);
-        }
-        let cmd = Command { tris: ttris,
-                            view,
-                            proj };
+        let proj = Projection::new_perspective(SCREEN_WIDTH, SCREEN_HEIGHT, fov);
+        let proj = proj.into_matrix();
+        let view = cam.recip().into_matrix();
+        let mdl = mdl.into_matrix();
+        let mdlviewproj = mdl * view * proj;
+        let map = |vert: &Vertex| {
+            let mut proj = vert.pos * mdlviewproj;
+            let recip = proj[3].recip();
+            proj *= recip;
+            proj[3] = recip;
+            ProjectedVertex {proj: proj.into_intrinsic(), color: vert.color.into_intrinsic()}
+        };
+        let proj = Vec::from_iter(verts.iter().map(map));
+        let cmd = Command { proj };
         self.cmds.wlock().push(cmd);
     }
 
     /// Commits all the commands added to the queue, drawing them to the
-    /// off-screen buffer.
+    /// frame buffer.
     ///
     /// Returns a future that, when awaited, blocks the task until the next
     /// vertical synchronization event after drawing everything.
     pub async fn commit(&'static self)
     {
         if self.did_commit.swap(true, Ordering::Relaxed) {
-            let vsync = VerticalSync::new(self.frame.load(Ordering::Relaxed));
+            let vsync = VerticalSync::new(self.fb.frame());
             vsync.await;
             return;
         }
@@ -263,76 +238,18 @@ impl Video
             task.await;
         }
         self.cmds.wlock().clear();
-        self.tile.store(0, Ordering::Relaxed);
-        let vsync = VerticalSync::new(self.frame.load(Ordering::Relaxed));
+        let vsync = VerticalSync::new(self.fb.frame());
         vsync.await;
     }
 
     /// Draws tiles to the frame buffer.
     async fn draw(&self)
     {
-        // Draw to the off-screen buffer.
-        let base = if self.frame.load(Ordering::Relaxed) & 0x1 == 0 {
-            self.fb1
-        } else {
-            self.fb0
-        };
-        let cmds = self.cmds.rlock();
-        let tw = TILE_WIDTH as f32;
-        let th = TILE_HEIGHT as f32;
-        #[repr(align(64), C)]
-        struct Tile([Color; TILE_WIDTH * TILE_HEIGHT]);
-        let mut colors = MaybeUninit::<Tile>::uninit();
-        let colors = unsafe { colors.assume_init_mut() };
-        loop {
-            let tile = self.tile.fetch_add(1, Ordering::Relaxed);
-            if tile >= SCREEN_WIDTH * SCREEN_HEIGHT / (TILE_WIDTH * TILE_HEIGHT) {
-                fence(Ordering::Release);
-                return;
-            }
-            colors.0.iter_mut().for_each(|color| *color = Color::default());
+        for mut tile in self.fb.tiles() {
+            let cmds = self.cmds.rlock();
             for cmd in cmds.iter() {
-                let mut tris = cmd.tris.iter().fuse();
-                let proj = cmd.proj
-                              .for_tile(SCREEN_WIDTH, SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT, tile)
-                              .for_view(cmd.view);
-                while let (Some(vert0), Some(vert1), Some(vert2)) = (tris.next(), tris.next(), tris.next()) {
-                    let (vert0p, vert1p, vert2p) =
-                        if let Some((v1, v2, v3)) = proj.project_tri(vert0.pos, vert1.pos, vert2.pos) {
-                            (v1, v2, v3)
-                        } else {
-                            continue;
-                        };
-                    for row in 0 .. TILE_HEIGHT {
-                        for col in 0 .. TILE_WIDTH {
-                            let x = ((col * 2) as f32 - tw + 1.0) / tw;
-                            let y = ((row * 2) as f32 - th + 1.0) / th;
-                            let point = Vector::from_components(x, y, 0.0);
-                            if let Some(triang) = Triangulation::from_point_triangle(point, vert0p, vert1p, vert2p) {
-                                let color = triang.sample(vert0.color, vert1.color, vert2.color);
-                                colors.0[row * TILE_WIDTH + col] = color;
-                            }
-                        }
-                    }
-                }
-            }
-            let col = tile * TILE_WIDTH % SCREEN_WIDTH;
-            let row = tile * TILE_WIDTH / SCREEN_WIDTH * TILE_HEIGHT;
-            let offset = row * PITCH * VPITCH + col * DEPTH;
-            let base = unsafe { base.byte_add(offset) };
-            for row in 0 .. TILE_HEIGHT {
-                for col in (0 .. TILE_WIDTH).step_by(unsafe { (*base).lanes() }) {
-                    let pix0 = colors.0[row * TILE_WIDTH + col].into_inner();
-                    let pix1 = colors.0[row * TILE_WIDTH + col + 1].into_inner();
-                    let pix2 = colors.0[row * TILE_WIDTH + col + 2].into_inner();
-                    let pix3 = colors.0[row * TILE_WIDTH + col + 3].into_inner();
-                    let pix4 = colors.0[row * TILE_WIDTH + col + 4].into_inner();
-                    let pix5 = colors.0[row * TILE_WIDTH + col + 5].into_inner();
-                    let pix6 = colors.0[row * TILE_WIDTH + col + 6].into_inner();
-                    let pix7 = colors.0[row * TILE_WIDTH + col + 7].into_inner();
-                    let pixgrp = u16x8::from([pix0, pix1, pix2, pix3, pix4, pix5, pix6, pix7]);
-                    let offset = row * PITCH * VPITCH + col * DEPTH;
-                    unsafe { base.byte_add(offset).write(pixgrp) };
+                for proj in cmd.proj.iter().array_chunks::<3>() {
+                    tile.draw_triangle(*proj[0], *proj[1], *proj[2]);
                 }
             }
         }
@@ -341,13 +258,14 @@ impl Video
     /// Flips the frame buffers and reinitializes the frame drawing cycle.
     fn vsync()
     {
-        if VIDEO.tile.load(Ordering::Relaxed) != 0 {
-            return;
-        }
+        let cfb = VIDEO.cfb.load(Ordering::Relaxed);
+        let ofb = VIDEO.fb.vsync();
         // Frame buffer pointers must point at the beginning of the last row instead of
         // the first because we are telling the HVS to draw with the Y axis flipped.
-        let fb0 = (to_dma(VIDEO.fb0 as _) + PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32;
-        let fb1 = (to_dma(VIDEO.fb1 as _) + PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32;
+        let ofb = ofb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32);
+        if ofb == cfb {
+            return;
+        }
         // Look for the index of the frame buffer pointers in the HVS display list
         // buffer.  This should only loop a lot when the firmware configuration changes,
         // after that it should find the index to update very quickly.
@@ -359,7 +277,7 @@ impl Video
                 if ctrl >> 15 & 0x1 != 0 {
                     // Check whether this plane contains one of our frame buffers.
                     let fb = unsafe { HVS_DISPLIST_BUF.add(idx + 5).read_volatile() };
-                    if fb == fb0 || fb == fb1 {
+                    if fb == cfb || fb == ofb {
                         // Found the index to update.
                         break 'outer idx + 5;
                     }
@@ -372,22 +290,14 @@ impl Video
                 idx += (ctrl >> 24 & 0x3F) as usize;
             }
         };
-        let frame = VIDEO.frame.fetch_add(1, Ordering::Relaxed);
-        if frame & 0x1 == 0 {
-            unsafe { HVS_DISPLIST_BUF.add(idx).write_volatile(fb0) };
-        } else {
-            unsafe { HVS_DISPLIST_BUF.add(idx).write_volatile(fb1) };
-        }
+        VIDEO.cfb.store(ofb, Ordering::Relaxed);
+        unsafe { HVS_DISPLIST_BUF.add(idx).write_volatile(ofb) };
         VIDEO.did_commit.store(false, Ordering::SeqCst);
         let mut waiters = VIDEO.waiters.lock();
         waiters.iter().for_each(|waker| waker.wake_by_ref());
         waiters.clear();
     }
 }
-
-unsafe impl Send for Video {}
-
-unsafe impl Sync for Video {}
 
 impl VerticalSync
 {
@@ -408,7 +318,7 @@ impl Future for VerticalSync
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<()>
     {
-        let frame = VIDEO.frame.load(Ordering::Relaxed);
+        let frame = VIDEO.fb.frame();
         if frame != self.frame {
             return Poll::Ready(());
         }
