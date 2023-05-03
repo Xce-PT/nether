@@ -1,202 +1,73 @@
-//! Projection transformation math.
+//! Projections in a 2D canvas.
 //!
-//! Provides a transformation to turn vectors from world coordinates into
-//! projected vectors in normalized coordinates.
-
-#[cfg(not(test))]
-use core::simd::SimdPartialOrd;
+//! To improve the efficiency of the fragment shading code, these projections are laid out such that the origin is at the bottom left corner of the canvas, the vanishing point is at the center,  vertices are offset by -0.5 pixels, and each unit represents a pixel.  In addition, to take advantage of the higher precision of floates with smaller values, the Z coordinate is also flipped such that the near clipping plane produces a Z value of 1.0 after the perspective divide, and the far clipping plane, which is at infinity, produces a value of 0.0 after the perspective divide.
 
 use super::*;
 
-/// Projection transformation.
+const NEAR: f32 = 1.0 / 16.0;
+
+/// Projection matrix.
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
-pub struct Projector
-{
-    /// Internal representation.
-    mat: [f32x4; 4],
+pub struct Projection {
+    /// Raw matrix.
+    mat: Matrix,
 }
 
-/// Projector transformed for a specific tile.
-#[derive(Clone, Copy, Debug)]
-pub struct TileProjector
-{
-    /// Internal representation.
-    mat: [f32x4; 4],
-}
-
-/// View transformed by a tiled projector.
-#[derive(Clone, Copy, Debug)]
-pub struct ViewTileProjector
-{
-    /// Internal representation.
-    mat: [f32x4; 4],
-}
-
-/// Vector transformed by the projection transformation.
-#[derive(Clone, Copy, Debug)]
-pub struct ProjectedVector
-{
-    /// Internal representation.
-    pub(super) vec: f32x4,
-}
-
-impl Projector
-{
-    /// Creates and initializes a new perspective projector.
+impl Projection {
+    /// Creates and initializes a new perspective projection.
     ///
-    /// * `width`: Screen width in tiles.
-    /// * `height`: Screen height in tiles.
-    /// * `tile`: Tile identifier.
+    /// * `width`: Screen width.
+    /// * `height`: Screen height.
     /// * `fov`: Field of view.
-    /// * `near`: Near clipping plane.
-    /// * `far`: Far clipping plane.
     ///
-    /// Returns the created projector.
-    pub fn perspective(fov: f32, near: f32, far: f32) -> Self
-    {
-        let scale = (fov * 0.5).tan().recip();
-        let invrange = (near - far).recip();
-        let z = far * invrange;
-        let zw = -1.0;
-        let wz = near * far * invrange;
-        let mat0 = f32x4::from([scale, 0.0, 0.0, 0.0]);
-        let mat1 = f32x4::from([0.0, scale, 0.0, 0.0]);
-        let mat2 = f32x4::from([0.0, 0.0, z, zw]);
-        let mat3 = f32x4::from([0.0, 0.0, wz, 0.0]);
-        let mat = [mat0, mat1, mat2, mat3];
-        Self { mat }
+    /// Returns the newly created projection.
+    pub fn new_perspective(width: usize, height: usize, fov: Angle) -> Self {
+        let halfwidth = (width / 2) as f32;
+        let halfheight = (height / 2) as f32;
+        let angle = Angle::from_cos(fov.w); // Half angle.
+        let scale = angle.tan().recip() * if width >= height {halfheight} else {halfwidth};
+        let xoff = -halfwidth;
+        let yoff = -halfheight;
+        let vec0 = Vector::from([scale, 0.0, 0.0, 0.0]);
+        let vec1 = Vector::from([0.0, scale, 0.0, 0.0]);
+        let vec2 = Vector::from([xoff, yoff, 0.0, -1.0]);
+        let vec3 = Vector::from([0.0, 0.0, NEAR, 0.0]);
+        let mat = Matrix::from([vec0, vec1, vec2, vec3]);
+        Self {mat}
     }
-
-    /// Creates a new tile projector by applying the required changes to this
-    /// projector, normalizing coordinates inside a specific tile.
-    ///
-    /// * `width`: Screen width in tiles.
-    /// * `height`: Screen height in tiles.
-    /// * `tile`: Tile index.
-    ///
-    /// Returns the newly created tile projector.
-    pub fn for_tile(self, width: usize, height: usize, twidth: usize, theight: usize, tile: usize) -> TileProjector
-    {
-        let cols = width / twidth;
-        let col = tile % cols;
-        let row = tile / cols;
-        assert!(row < height,
-                "Tile {tile} is out of bounds for a screen with {width}x{height} tiles");
-        let width = width as f32;
-        let height = height as f32;
-        let (xscale, yscale) = if width >= height {
-            (height / width, 1.0)
-        } else {
-            (1.0, width / height)
-        };
-        let width = width / twidth as f32;
-        let height = height / theight as f32;
-        let xscale = xscale * width;
-        let yscale = yscale * height;
-        let left = width * -0.5 + col as f32;
-        let bottom = height * -0.5 + row as f32;
-        let x = self.mat[0][0] * xscale;
-        let y = self.mat[1][1] * yscale;
-        let zx = left + left + 1.0;
-        let zy = bottom + bottom + 1.0;
-        let z = self.mat[2][2];
-        let zw = self.mat[2][3];
-        let wz = self.mat[3][2];
-        let mat0 = f32x4::from([x, 0.0, 0.0, 0.0]);
-        let mat1 = f32x4::from([0.0, y, 0.0, 0.0]);
-        let mat2 = f32x4::from([zx, zy, z, zw]);
-        let mat3 = f32x4::from([0.0, 0.0, wz, 0.0]);
-        let mat = [mat0, mat1, mat2, mat3];
-        TileProjector { mat }
-    }
-}
-
-impl TileProjector
-{
-    /// Creates a new view tile projector by applying a view transformation to
-    /// this tile projector.
-    ///
-    /// * `view`: View transformation (reciprocal of the camera transformation).
-    ///
-    /// Returns the newly created projector.
-    pub fn for_view(self, view: Matrix) -> ViewTileProjector
-    {
-        let mat = mat_mul(self.mat, view.transform);
-        ViewTileProjector { mat }
-    }
-}
-
-impl ViewTileProjector
-{
-    /// Projects a triangle from world space to clip space.
-    ///
-    /// * `vert0`: First vertex.
-    /// * `vert1`: Second vertex.
-    /// * `vert2`: Third vertex.
-    ///
-    /// Returns the projected vertices if they are to be drawn in
-    /// counter-clockwise order and the triangle that they form might fit
-    /// partially or wholly inside clip space.
-    #[cfg(not(test))]
-    pub fn project_tri(self, vert0: Vector, vert1: Vector, vert2: Vector)
-                       -> Option<(ProjectedVector, ProjectedVector, ProjectedVector)>
-    {
-        let vert0 = self.project(vert0);
-        let vert1 = self.project(vert1);
-        let vert2 = self.project(vert2);
-        let vert1r = vert1.vec - vert0.vec;
-        let vert2r = vert2.vec - vert0.vec;
-        let det = vert1r[0] * vert2r[1] - vert1r[1] * vert2r[0];
-        if det <= 0.0 {
-            return None;
-        }
-        let min = vert0.vec.simd_min(vert1.vec);
-        let min = min.simd_min(vert2.vec);
-        let max = vert0.vec.simd_max(vert1.vec);
-        let max = max.simd_max(vert2.vec);
-        let clipmin = f32x4::from([-1.0, -1.0, 0.0, 0.0]);
-        let clipmax = f32x4::from([1.0, 1.0, 1.0, f32::INFINITY]);
-        if (max.simd_lt(clipmin) | min.simd_gt(clipmax)).any() {
-            return None;
-        }
-        Some((vert0, vert1, vert2))
-    }
-
-    /// Projects a vector from world coordinates too normalized coordinates.
-    ///
-    /// * `vec`: Vector to project.
-    ///
-    /// Returns the resulting vector.
-    fn project(self, vec: Vector) -> ProjectedVector
-    {
-        let mut vec = vec.vec;
-        vec[3] = 1.0;
-        vec = mat_vec_mul(self.mat, vec);
-        let w = f32x4::splat(vec[3].recip());
-        vec[3] = 1.0;
-        vec *= w;
-        ProjectedVector { vec }
+    
+    /// Returns the matrix for this projection.
+    pub fn into_matrix(self) -> Matrix {
+        self.mat
     }
 }
 
 #[cfg(test)]
-mod tests
-{
-    use core::f32::consts::{FRAC_PI_3, FRAC_PI_6};
-
+mod tests {
+    use core::f32::consts::PI;
     use super::*;
-
+    
     #[test]
-    fn projector_perspective_clip_frustum()
-    {
-        let proj = Projector::perspective(FRAC_PI_3, 0.5, 2.0);
-        let tvproj = proj.for_tile(1920, 1080, 16, 18, 0).for_view(Matrix::default());
-        let point = Vector::from_components(1920.0 / 1080.0 * -0.5 * FRAC_PI_6.tan(), -0.5 * FRAC_PI_6.tan(), -0.5);
-        let res = tvproj.project(point);
-        assert!(is_roughly(res.vec, f32x4::from([-1.0, -1.0, 0.0, 2.0])));
-        let tvproj = proj.for_tile(1920, 1080, 16, 18, 7199).for_view(Matrix::default());
-        let point = Vector::from_components(1920.0 / 1080.0 * 2.0 * FRAC_PI_6.tan(), 2.0 * FRAC_PI_6.tan(), -2.0);
-        let res = tvproj.project(point);
-        assert!(is_roughly(res.vec, f32x4::from([1.0, 1.0, 1.0, 0.5])));
+    fn project() {
+        let width = 320;
+        let height = 240;
+        let fov = Angle::from(PI / 3.0);
+        let proj = Projection::new_perspective(width, height, fov);
+        let rhs = proj.into_matrix();
+        let tanpisix = (PI / 6.0).tan();
+        let lhs = Vector::from([0.0, 0.0, -1.0, 1.0]);
+        let actual = lhs * rhs;
+        let expected = Vector::from([160.0, 120.0, NEAR, 1.0]);
+        expect_roughly_vec(actual, expected);
+        let lhs = Vector::from([tanpisix, tanpisix, -1.0, 1.0]);
+        let actual = lhs * rhs;
+        let expected = Vector::from([280.0, 240.0, NEAR, 1.0]);
+        expect_roughly_vec(actual, expected);
+        let lhs = Vector::from([tanpisix, tanpisix, -2.0, 1.0]);
+        let actual = lhs * rhs;
+        let actual = actual / actual[3];
+        let expected = Vector::from([220.0, 180.0, NEAR / 2.0, 1.0]);
+        expect_roughly_vec(actual, expected);
     }
 }
