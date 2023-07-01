@@ -1,56 +1,66 @@
 //! Angles and trigonometry.
 
-use core::cmp::{PartialOrd, Ordering, Reverse};
+use core::cmp::{Ordering, PartialOrd, Reverse};
 use core::f32::consts::PI;
 use core::fmt::{Display, Formatter, Result as FormatResult};
+
 use super::*;
 
 /// Angle.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Angle {
+pub struct Angle
+{
     /// Cosine of half the angle.
     pub(super) w: f32,
 }
 
-impl Angle {
+impl Angle
+{
     /// Creates and initializes a new angle with the provided cosine.
     ///
     /// * `cos`: Cosine of the angle.
     ///
     /// Returns the newly created angle.
-    pub fn from_cos(cos: f32) -> Self {
+    pub fn from_cos(cos: f32) -> Self
+    {
         let cos = cos.clamp(-1.0, 1.0);
-        if cos == -1.0 {return Self {w: 0.0}}
+        if cos == -1.0 {
+            return Self { w: 0.0 };
+        }
         let icos = 1.0 + cos;
         let sqx = icos * icos;
         let sqy = 1.0 - cos * cos;
         let w = icos / (sqx + sqy).sqrt();
-        Self {w}
+        Self { w }
     }
-    
+
     /// Computes the sine and cosine of this angle.
     ///
     /// Returns the computed values.
-    pub fn sin_cos(self) -> (f32, f32) {
+    pub fn sin_cos(self) -> (f32, f32)
+    {
         let sqx = self.w * self.w;
         let sqy = 1.0 - sqx;
         let cos = sqx - sqy;
         let sin = (1.0 - cos * cos).sqrt() * self.w.signum();
         (sin, cos)
     }
-    
+
     /// Computes the tangent of this angle.
     ///
     /// Returns the computed value.
-    pub fn tan(self) -> f32 {
+    pub fn tan(self) -> f32
+    {
         let (sin, cos) = self.sin_cos();
         sin / cos
     }
 }
 
-impl From<f32> for Angle {
-    fn from(radians: f32) -> Self {
+impl From<f32> for Angle
+{
+    fn from(radians: f32) -> Self
+    {
         let angle = radians.abs() / 2.0 % PI;
         let mut res = 1.0f32;
         let mut n = 2.0f32;
@@ -65,32 +75,40 @@ impl From<f32> for Angle {
             res += diff;
         }
         res *= radians.signum();
-        Self {w: res}
+        Self { w: res }
     }
 }
 
-impl PartialOrd<Self> for Angle {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+impl PartialOrd<Self> for Angle
+{
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering>
+    {
         <Reverse<f32> as PartialOrd<_>>::partial_cmp(&Reverse(self.w), &Reverse(other.w))
     }
 }
 
-impl Default for Angle {
-    fn default() -> Self {
-        Self {w: 1.0}
+impl Default for Angle
+{
+    fn default() -> Self
+    {
+        Self { w: 1.0 }
     }
 }
 
-impl Display for Angle {
-    fn fmt(&self, fmt: &mut Formatter) -> FormatResult {
+impl Display for Angle
+{
+    fn fmt(&self, fmt: &mut Formatter) -> FormatResult
+    {
         let radians = f32::from(*self);
         let degrees = radians / PI * 180.0;
         write!(fmt, "{radians} radians ({degrees} degrees)")
     }
 }
 
-impl From<Angle> for f32 {
-    fn from(angle: Angle) -> Self {
+impl From<Angle> for f32
+{
+    fn from(angle: Angle) -> Self
+    {
         let mut lim = 1.0;
         let mut cos = angle.w.abs();
         let sin = (1.0 - cos * cos).sqrt();
@@ -107,11 +125,13 @@ impl From<Angle> for f32 {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests
+{
     use super::*;
-    
+
     #[test]
-    fn from_radians() {
+    fn from_radians()
+    {
         let angle = Angle::from(0.0);
         expect_roughly(angle.w, 1.0);
         let angle = Angle::from(PI / 3.0);
@@ -143,9 +163,10 @@ mod tests {
         let angle = Angle::from(-PI * 3.0 / 2.0);
         expect_roughly(angle.w, (PI / 4.0).cos());
     }
-    
+
     #[test]
-    fn from_cos() {
+    fn from_cos()
+    {
         let angle = Angle::from_cos(0.0f32.cos());
         expect_roughly(angle.w, 1.0);
         let angle = Angle::from_cos((PI / 3.0).cos());
@@ -159,66 +180,69 @@ mod tests {
         let angle = Angle::from_cos(2.0);
         expect_roughly(angle.w, 1.0);
     }
-    
+
     #[test]
-    fn sin_cos() {
-        let angle = Angle {w: 0.0f32.cos()};
+    fn sin_cos()
+    {
+        let angle = Angle { w: 0.0f32.cos() };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, 0.0);
         expect_roughly(cos, 1.0);
-        let angle = Angle {w: (PI / 6.0).cos()};
+        let angle = Angle { w: (PI / 6.0).cos() };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, (PI / 3.0).sin());
         expect_roughly(cos, 0.5);
-        let angle = Angle {w: (PI / 4.0).cos()};
+        let angle = Angle { w: (PI / 4.0).cos() };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, 1.0);
         expect_roughly(cos, 0.0);
-        let angle = Angle {w: (PI / 3.0).cos()};
+        let angle = Angle { w: (PI / 3.0).cos() };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, (PI * 2.0 / 3.0).sin());
         expect_roughly(cos, -0.5);
-        let angle = Angle {w: 0.0};
+        let angle = Angle { w: 0.0 };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, 0.0);
         expect_roughly(cos, -1.0);
-        let angle = Angle {w: (PI * 3.0 / 4.0).cos()};
+        let angle = Angle { w: (PI * 3.0 / 4.0).cos() };
         let (sin, cos) = angle.sin_cos();
         expect_roughly(sin, -1.0);
         expect_roughly(cos, 0.0);
     }
-    
+
     #[test]
-    fn tan() {
-        let angle = Angle {w: (PI / 12.0).cos()};
+    fn tan()
+    {
+        let angle = Angle { w: (PI / 12.0).cos() };
         let tan = angle.tan();
         expect_roughly(tan, (PI / 6.0).tan());
     }
-    
+
     #[test]
-    fn into_radians() {
-        let angle = Angle {w: (PI / 3.0).cos()};
+    fn into_radians()
+    {
+        let angle = Angle { w: (PI / 3.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI * 2.0 / 3.0);
-        let angle = Angle {w: (PI * 2.0 / 3.0).cos()};
+        let angle = Angle { w: (PI * 2.0 / 3.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI * 4.0 / 3.0);
-        let angle = Angle {w: (PI / 16.0).cos()};
+        let angle = Angle { w: (PI / 16.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI / 8.0);
-        let angle = Angle {w: (PI * 5.0 / 16.0).cos()};
+        let angle = Angle { w: (PI * 5.0 / 16.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI * 5.0 / 8.0);
-        let angle = Angle {w: (PI * 9.0 / 16.0).cos()};
+        let angle = Angle { w: (PI * 9.0 / 16.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI * 9.0 / 8.0);
-        let angle = Angle {w: (PI * 13.0 / 16.0).cos()};
+        let angle = Angle { w: (PI * 13.0 / 16.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI * 13.0 / 8.0);
-        let angle = Angle {w: (PI / 4.0).cos()};
+        let angle = Angle { w: (PI / 4.0).cos() };
         let radians = f32::from(angle);
         expect_roughly(radians, PI / 2.0);
-        let angle = Angle {w: 0.0};
+        let angle = Angle { w: 0.0 };
         let radians = f32::from(angle);
         expect_roughly(radians, PI);
     }

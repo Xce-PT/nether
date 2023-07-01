@@ -30,7 +30,7 @@ use core::task::{Context, Poll, Waker};
 pub use self::fb::{FrameBuffer, Vertex as ProjectedVertex};
 pub use self::geom::*;
 use crate::cpu::COUNT as CPU_COUNT;
-use crate::math::{Angle, Transform, Projection, Vector};
+use crate::math::{Angle, Projection, Transform, Vector};
 use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
 use crate::sync::{Lazy, Lock, RwLock};
@@ -191,7 +191,8 @@ impl Video
                                           transform: IMG_TRANSFORM };
         mbox! {SET_PLANE_TAG: plane_in => _};
         PIXVALVE.register_vsync(Self::vsync);
-        Self { fb, cfb: AtomicU32::new(cfb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32)),
+        Self { fb,
+               cfb: AtomicU32::new(cfb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32)),
                did_commit: AtomicBool::new(false),
                waiters: Lock::new(Vec::new()),
                cmds: RwLock::new(Vec::new()) }
@@ -214,7 +215,8 @@ impl Video
             let recip = proj[3].recip();
             proj *= recip;
             proj[3] = recip;
-            ProjectedVertex {proj: proj.into_intrinsic(), color: vert.color.into_intrinsic()}
+            ProjectedVertex { proj: proj.into_intrinsic(),
+                              color: vert.color.into_intrinsic() }
         };
         let proj = Vec::from_iter(verts.iter().map(map));
         let cmd = Command { proj };

@@ -8,9 +8,10 @@ use core::arch::aarch64::*;
 use core::iter::Iterator;
 use core::mem::size_of;
 use core::simd::u16x4;
-use crate::to_dma;
+
 use crate::alloc::{Alloc, UNCACHED_REGION};
 use crate::sync::Lock;
+use crate::to_dma;
 
 /// Maximum width or height of a tile.
 const TILE_DIM_MAX: usize = 32;
@@ -19,7 +20,8 @@ const TILE_DIM_MAX: usize = 32;
 static UNCACHED: Alloc<0x40> = Alloc::with_region(&UNCACHED_REGION);
 
 /// Frame buffer.
-pub struct FrameBuffer {
+pub struct FrameBuffer
+{
     /// First frame buffer.
     fb0: *mut u16x4,
     /// Second frame buffer.
@@ -37,7 +39,8 @@ pub struct FrameBuffer {
 }
 
 /// Frame buffer iterator.
-pub struct FrameBufferIterator<'a> {
+pub struct FrameBufferIterator<'a>
+{
     /// Frame buffer being iterated.
     fb: &'a FrameBuffer,
     /// Frame being iterated.
@@ -45,7 +48,8 @@ pub struct FrameBufferIterator<'a> {
 }
 
 /// Frame buffer tile.
-pub struct Tile<'a> {
+pub struct Tile<'a>
+{
     /// Frame buffer that this tile draws on.
     fb: &'a FrameBuffer,
     /// Origin column for this tile.
@@ -58,7 +62,8 @@ pub struct Tile<'a> {
 
 /// Vertex.
 #[derive(Clone, Copy, Debug)]
-pub struct Vertex {
+pub struct Vertex
+{
     /// Projected position.
     pub proj: float32x4_t,
     /// RGBA color.
@@ -67,7 +72,8 @@ pub struct Vertex {
 
 /// Frame buffer control.
 #[derive(Debug)]
-struct Control {
+struct Control
+{
     /// Current frame ID.
     frame: u64,
     /// Next tile ID.
@@ -76,7 +82,8 @@ struct Control {
     tfinished: usize,
 }
 
-impl FrameBuffer {
+impl FrameBuffer
+{
     /// Creates and initializes a new frame buffer.
     ///
     /// * `width`: Image width.
@@ -84,9 +91,11 @@ impl FrameBuffer {
     ///
     /// Returns the newly created frame buffer.
     ///
-    /// Panics if the resolution is not supported or the system runs out of uncached memory to allocate.
+    /// Panics if the resolution is not supported or the system runs out of
+    /// uncached memory to allocate.
     #[track_caller]
-    pub fn new(width: usize, height: usize) -> Self {
+    pub fn new(width: usize, height: usize) -> Self
+    {
         let mut twidth = 0;
         let mut theight = 0;
         for sz in (8 ..= TILE_DIM_MAX).step_by(8) {
@@ -99,39 +108,40 @@ impl FrameBuffer {
         }
         assert!(twidth > 0 && theight > 0, "Invalid width or height");
         let layout = Layout::from_size_align(width * height * size_of::<u16>(), 64).unwrap();
-        let fb0 = unsafe {UNCACHED.alloc_zeroed(layout).cast::<u16x4>()};
-        let fb1 = unsafe {UNCACHED.alloc_zeroed(layout).cast::<u16x4>()};
-        assert!(!fb0.is_null() && !fb1.is_null(), "Failed to allocate memory for the frame buffers");
-        let ctrl = Control {
-            frame: 0,
-            tnext: 0,
-            tfinished: 0,
-        };
-        Self {
-            fb0,
-            fb1,
-            width,
-            height,
-            twidth,
-            theight,
-            ctrl: Lock::new(ctrl),
-        }
+        let fb0 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16x4>() };
+        let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16x4>() };
+        assert!(!fb0.is_null() && !fb1.is_null(),
+                "Failed to allocate memory for the frame buffers");
+        let ctrl = Control { frame: 0,
+                             tnext: 0,
+                             tfinished: 0 };
+        Self { fb0,
+               fb1,
+               width,
+               height,
+               twidth,
+               theight,
+               ctrl: Lock::new(ctrl) }
     }
-    
+
     /// Returns the current frame ID.
-    pub fn frame(&self) -> u64 {
+    pub fn frame(&self) -> u64
+    {
         self.ctrl.lock().frame
     }
-    
+
     /// Creates an iterator of tiles awaiting to be drawn.
     ///
     /// Returns the newly created iterator.
-    pub fn tiles(&self) -> FrameBufferIterator {
+    pub fn tiles(&self) -> FrameBufferIterator
+    {
         FrameBufferIterator::new(self)
     }
-    
-    /// Returns the DMA address of the frame buffer not currently being drawn, flipping them beforehand if drawing has finished.
-    pub fn vsync(&self) -> u32 {
+
+    /// Returns the DMA address of the frame buffer not currently being drawn,
+    /// flipping them beforehand if drawing has finished.
+    pub fn vsync(&self) -> u32
+    {
         let mut ctrl = self.ctrl.lock();
         if ctrl.tfinished == self.width * self.height / (self.twidth * self.theight) {
             ctrl.tnext = 0;
@@ -145,8 +155,10 @@ impl FrameBuffer {
     }
 }
 
-impl Drop for FrameBuffer {
-    fn drop(&mut self) {
+impl Drop for FrameBuffer
+{
+    fn drop(&mut self)
+    {
         let layout = Layout::from_size_align(self.width * self.height * size_of::<u16>(), 64).unwrap();
         unsafe {
             UNCACHED.dealloc(self.fb0.cast(), layout);
@@ -159,24 +171,26 @@ unsafe impl Send for FrameBuffer {}
 
 unsafe impl Sync for FrameBuffer {}
 
-impl<'a> FrameBufferIterator<'a> {
+impl<'a> FrameBufferIterator<'a>
+{
     /// Creates and initializes a new iterator over the tiles of a frame buffer.
     ///
     /// * `fb`: Frame buffer that this iterator borrows tiles from.
     ///
     /// Returns the newly created iterator.
-    fn new(fb: &'a FrameBuffer) -> Self {
-        Self {
-            fb,
-            frame: fb.ctrl.lock().frame,
-        }
+    fn new(fb: &'a FrameBuffer) -> Self
+    {
+        Self { fb,
+               frame: fb.ctrl.lock().frame }
     }
 }
 
-impl<'a> Iterator for FrameBufferIterator<'a> {
+impl<'a> Iterator for FrameBufferIterator<'a>
+{
     type Item = Tile<'a>;
-    
-    fn next(&mut self) -> Option<Tile<'a>> {
+
+    fn next(&mut self) -> Option<Tile<'a>>
+    {
         let mut ctrl = self.fb.ctrl.lock();
         if self.frame != ctrl.frame {
             return None;
@@ -190,7 +204,8 @@ impl<'a> Iterator for FrameBufferIterator<'a> {
     }
 }
 
-impl<'a> Tile<'a> {
+impl<'a> Tile<'a>
+{
     /// Creates and initializes a new tile.
     ///
     /// * `fb`: Frame buffer that this tile represents.
@@ -198,21 +213,24 @@ impl<'a> Tile<'a> {
     ///
     /// Returns the newly created tile.
     #[track_caller]
-    fn new(fb: &'a FrameBuffer, id: usize) -> Self {
+    fn new(fb: &'a FrameBuffer, id: usize) -> Self
+    {
         let col = id * fb.twidth % fb.width;
         let row = id * fb.twidth / fb.width * fb.theight;
         let tb = [u16x4::default(); TILE_DIM_MAX * TILE_DIM_MAX / 4];
-        Self {fb, col, row, tb}
+        Self { fb, col, row, tb }
     }
-    
+
     /// Draws a triangle to the tile.
     ///
     /// * `vert0`: First vertex.
     /// * `vert1`: Second vertex.
     /// * `vert2`: Third vertex.
-    pub fn draw_triangle(&mut self, vert0: Vertex, vert1: Vertex, vert2: Vertex) {
+    pub fn draw_triangle(&mut self, vert0: Vertex, vert1: Vertex, vert2: Vertex)
+    {
         unsafe {
-            // Skip if the bounding rectangle of the triangle is completely outside the tile.
+            // Skip if the bounding rectangle of the triangle is completely outside the
+            // tile.
             let fcol = self.col as f32;
             let frow = self.row as f32;
             let min = vminq_f32(vert0.proj, vert1.proj);
@@ -220,7 +238,10 @@ impl<'a> Tile<'a> {
             let max = vmaxq_f32(vert0.proj, vert1.proj);
             let max = vmaxq_f32(max, vert2.proj);
             let tmin = vld1q_f32([fcol, frow, 0.0, 0.0].as_ptr());
-            let tmax = vld1q_f32([fcol + self.fb.twidth as f32, frow + self.fb.theight as f32, 1.0, f32::INFINITY].as_ptr());
+            let tmax = vld1q_f32([fcol + self.fb.twidth as f32,
+                                  frow + self.fb.theight as f32,
+                                  1.0,
+                                  f32::INFINITY].as_ptr());
             let cond0 = vcgtq_f32(tmax, min);
             let cond1 = vcltq_f32(tmin, max);
             let cond = vandq_u32(cond0, cond1);
@@ -353,7 +374,7 @@ impl<'a> Tile<'a> {
                         let cond0 = vcgezq_f32(z);
                         let cond1 = vcleq_f32(z, one);
                         let valid = vandq_u32(valid, cond0);
-                        let valid = vandq_u32(valid,cond1);
+                        let valid = vandq_u32(valid, cond1);
                         // Compute the color values.
                         let maxrb = vdupq_n_f32(31.5);
                         let maxg = vdupq_n_f32(63.5);
@@ -396,14 +417,16 @@ impl<'a> Tile<'a> {
     }
 }
 
-impl<'a> Drop for Tile<'a> {
-    fn drop(&mut self) {
+impl<'a> Drop for Tile<'a>
+{
+    fn drop(&mut self)
+    {
         let buf = if self.fb.ctrl.lock().frame & 0x1 == 0 {
             self.fb.fb1
         } else {
             self.fb.fb0
         };
-        let buf =unsafe {buf.add((self.row * self.fb.width + self.col) / 4)};
+        let buf = unsafe { buf.add((self.row * self.fb.width + self.col) / 4) };
         for trow in 0 .. self.fb.theight {
             unsafe {
                 let buf = buf.add(trow * self.fb.width / 4);

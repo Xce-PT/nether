@@ -79,7 +79,8 @@ pub unsafe extern "C" fn memset(buf: *mut c_void, val: c_int, len: c_size_t) -> 
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn fmodf(x: c_float, y: c_float) -> c_float {
+pub unsafe extern "C" fn fmodf(x: c_float, y: c_float) -> c_float
+{
     let res: c_float;
     asm!(
         "fdiv {res:s}, {x:s}, {y:s}",
