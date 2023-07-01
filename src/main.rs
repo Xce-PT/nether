@@ -55,7 +55,7 @@ use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
-use self::math::{Angle, Transform, Quaternion, Vector};
+use self::math::{Angle, Quaternion, Transform, Vector};
 #[cfg(not(test))]
 use self::sched::SCHED;
 #[cfg(not(test))]
