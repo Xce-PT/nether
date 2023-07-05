@@ -65,7 +65,7 @@ use self::touch::Recognizer;
 #[cfg(not(test))]
 use self::uart::UART;
 #[cfg(not(test))]
-use self::video::{Triangle, VIDEO};
+use self::video::{Square, Triangle, VIDEO};
 
 /// uncached RANGE.
 #[cfg(not(test))]
@@ -132,8 +132,13 @@ pub extern "C" fn start() -> !
 async fn ticker() -> !
 {
     let fov = Angle::from(FRAC_PI_2);
-    let tri = Triangle::new();
     let cam = Transform::default();
+    let square = Square::new();
+    let pos = Vector::from([0.0, 0.0, -4.0, 1.0]);
+    let rot = Quaternion::default();
+    let scale = 3.0;
+    let sqmdl = Transform::from_components(pos, rot, scale);
+    let tri = Triangle::new();
     let pos = Vector::from([0.0, 0.0, -2.0, 1.0]);
     let mut rot = Quaternion::default();
     let scale = 1.0;
@@ -148,6 +153,7 @@ async fn ticker() -> !
         rot *= recog.rotated();
         let mdl = Transform::from_components(pos, rot, scale);
         VIDEO.draw_triangles(tri.geom(), mdl, cam, fov);
+        VIDEO.draw_triangles(square.geom(), sqmdl, cam, fov);
         VIDEO.commit().await;
     }
 }

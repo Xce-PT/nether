@@ -7,7 +7,6 @@ use core::alloc::Layout;
 use core::arch::aarch64::*;
 use core::iter::Iterator;
 use core::mem::size_of;
-use core::simd::u16x4;
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
 use crate::sync::Lock;
@@ -23,9 +22,9 @@ static UNCACHED: Alloc<0x40> = Alloc::with_region(&UNCACHED_REGION);
 pub struct FrameBuffer
 {
     /// First frame buffer.
-    fb0: *mut u16x4,
+    fb0: *mut u16,
     /// Second frame buffer.
-    fb1: *mut u16x4,
+    fb1: *mut u16,
     /// Image width.
     width: usize,
     /// Image height.
@@ -57,7 +56,9 @@ pub struct Tile<'a>
     /// Origin row for this tile.
     row: usize,
     /// Tile's color buffer.
-    tb: [u16x4; TILE_DIM_MAX * TILE_DIM_MAX / 4],
+    cb: [u16; TILE_DIM_MAX * TILE_DIM_MAX],
+    /// Tile's depth buffer.
+    db: [u16; TILE_DIM_MAX * TILE_DIM_MAX],
 }
 
 /// Vertex.
@@ -108,8 +109,8 @@ impl FrameBuffer
         }
         assert!(twidth > 0 && theight > 0, "Invalid width or height");
         let layout = Layout::from_size_align(width * height * size_of::<u16>(), 64).unwrap();
-        let fb0 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16x4>() };
-        let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16x4>() };
+        let fb0 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16>() };
+        let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16>() };
         assert!(!fb0.is_null() && !fb1.is_null(),
                 "Failed to allocate memory for the frame buffers");
         let ctrl = Control { frame: 0,
@@ -212,13 +213,17 @@ impl<'a> Tile<'a>
     /// * `id`: ID of the tile.
     ///
     /// Returns the newly created tile.
+    ///
+    /// Panics if the specified tile identifier is outside the valid range.
     #[track_caller]
     fn new(fb: &'a FrameBuffer, id: usize) -> Self
     {
         let col = id * fb.twidth % fb.width;
         let row = id * fb.twidth / fb.width * fb.theight;
-        let tb = [u16x4::default(); TILE_DIM_MAX * TILE_DIM_MAX / 4];
-        Self { fb, col, row, tb }
+        assert!(row < fb.height, "Invalid tile ID: {id}");
+        let cb = [0; TILE_DIM_MAX * TILE_DIM_MAX];
+        let db = [0; TILE_DIM_MAX * TILE_DIM_MAX];
+        Self { fb, col, row, cb, db }
     }
 
     /// Draws a triangle to the tile.
@@ -397,13 +402,24 @@ impl<'a> Tile<'a>
                         let blue = vcvtq_u32_f32(blue);
                         let rgb565 = vorrq_u32(red, green);
                         let rgb565 = vorrq_u32(rgb565, blue);
-                        // Store the valid pixels in memory.
-                        let rgb565 = vmovn_u32(rgb565);
+                        // Store the valid pixels in the tile.
+                        let offset = row * self.fb.twidth + col;
                         let valid = vmovn_u32(valid);
-                        let offset = (row * self.fb.twidth + col) / 4;
-                        let orgb565 = vld1_u16(self.tb.as_ptr().add(offset).cast());
+                        let od = vld1_u16(self.db.as_ptr().add(offset));
+                        let d = vreinterpretq_u32_f32(z);
+                        let dx = vshrq_n_u32(d, 14);
+                        let dm = vshrq_n_u32(d, 12);
+                        let fm = vdupq_n_u32(0xF800);
+                        let d = vbslq_u32(fm, dx, dm);
+                        let d = vmovn_u32(d);
+                        let cond = vcgt_u16(d, od);
+                        let valid = vand_u16(valid, cond);
+                        let d = vbsl_u16(valid, d, od);
+                        vst1_u16(self.db.as_mut_ptr().add(offset), d);
+                        let rgb565 = vmovn_u32(rgb565);
+                        let orgb565 = vld1_u16(self.cb.as_ptr().add(offset));
                         let rgb565 = vbsl_u16(valid, rgb565, orgb565);
-                        vst1_u16(self.tb.as_mut_ptr().add(offset).cast(), rgb565);
+                        vst1_u16(self.cb.as_mut_ptr().add(offset), rgb565);
                     }
                     hbary0 = vaddq_f32(hbary0, hinc0);
                     hbary1 = vaddq_f32(hbary1, hinc1);
@@ -426,12 +442,12 @@ impl<'a> Drop for Tile<'a>
         } else {
             self.fb.fb0
         };
-        let buf = unsafe { buf.add((self.row * self.fb.width + self.col) / 4) };
+        let buf = unsafe { buf.add(self.row * self.fb.width + self.col) };
         for trow in 0 .. self.fb.theight {
             unsafe {
-                let buf = buf.add(trow * self.fb.width / 4);
-                let tb = self.tb.as_ptr().add(trow * self.fb.twidth / 4);
-                tb.copy_to_nonoverlapping(buf, self.fb.twidth / 4);
+                let buf = buf.add(trow * self.fb.width);
+                let cb = self.cb.as_ptr().add(trow * self.fb.twidth);
+                cb.copy_to_nonoverlapping(buf, self.fb.twidth);
             }
         }
         self.fb.ctrl.lock().tfinished += 1;
