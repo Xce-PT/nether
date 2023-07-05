@@ -15,6 +15,13 @@ pub struct Triangle
     geom: [Vertex; 6],
 }
 
+/// Gray background square.
+pub struct Square
+{
+    /// Geometry.
+    geom: [Vertex; 6],
+}
+
 impl Triangle
 {
     /// Creates and initializes a new triangle.
@@ -37,6 +44,33 @@ impl Triangle
     }
 
     /// Returns the geometry of the triangle.
+    pub fn geom(&self) -> &[Vertex]
+    {
+        &self.geom
+    }
+}
+
+impl Square
+{
+    /// Creates and initializes a new square.
+    ///
+    /// Returns the newly created square.
+    pub fn new() -> Self
+    {
+        let vert0 = Vector::from([-1.0, -1.0, 0.0, 1.0]);
+        let vert1 = Vector::from([1.0, -1.0, 0.0, 1.0]);
+        let vert2 = Vector::from([-1.0, 1.0, 0.0, 1.0]);
+        let vert3 = Vector::from([1.0, 1.0, 0.0, 1.0]);
+        let color = Vector::from([0.5, 0.5, 0.5, 1.0]);
+        let vert0 = Vertex { pos: vert0, color };
+        let vert1 = Vertex { pos: vert1, color };
+        let vert2 = Vertex { pos: vert2, color };
+        let vert3 = Vertex { pos: vert3, color };
+        let geom = [vert0, vert1, vert2, vert2, vert1, vert3];
+        Self { geom }
+    }
+
+    /// Returns the geometry of the square.
     pub fn geom(&self) -> &[Vertex]
     {
         &self.geom
