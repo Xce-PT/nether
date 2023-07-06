@@ -24,7 +24,7 @@ mod geom;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 pub use self::fb::{FrameBuffer, Vertex as ProjectedVertex};
@@ -74,6 +74,8 @@ pub struct Video
     cfb: AtomicU32,
     /// Whether this frame has been commited.
     did_commit: AtomicBool,
+    /// Current frame.
+    frame: AtomicU64,
     /// VSync waiters.
     waiters: Lock<Vec<Waker>>,
     /// Command queue.
@@ -194,6 +196,7 @@ impl Video
         Self { fb,
                cfb: AtomicU32::new(cfb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32)),
                did_commit: AtomicBool::new(false),
+               frame: AtomicU64::new(0),
                waiters: Lock::new(Vec::new()),
                cmds: RwLock::new(Vec::new()) }
     }
@@ -230,8 +233,9 @@ impl Video
     /// vertical synchronization event after drawing everything.
     pub async fn commit(&'static self)
     {
+        let frame = self.frame.load(Ordering::Relaxed);
         if self.did_commit.swap(true, Ordering::Relaxed) {
-            let vsync = VerticalSync::new(self.fb.frame());
+            let vsync = VerticalSync::new(frame);
             vsync.await;
             return;
         }
@@ -240,7 +244,7 @@ impl Video
             task.await;
         }
         self.cmds.wlock().clear();
-        let vsync = VerticalSync::new(self.fb.frame());
+        let vsync = VerticalSync::new(frame);
         vsync.await;
     }
 
@@ -260,41 +264,44 @@ impl Video
     /// Flips the frame buffers and reinitializes the frame drawing cycle.
     fn vsync()
     {
+        if VIDEO.frame.load(Ordering::Relaxed) == VIDEO.fb.frame() {
+            return;
+        }
         let cfb = VIDEO.cfb.load(Ordering::Relaxed);
         let ofb = VIDEO.fb.vsync();
         // Frame buffer pointers must point at the beginning of the last row instead of
         // the first because we are telling the HVS to draw with the Y axis flipped.
         let ofb = ofb + ((PITCH * VPITCH * (SCREEN_HEIGHT - 1)) as u32);
         if ofb == cfb {
-            return;
-        }
-        // Look for the index of the frame buffer pointers in the HVS display list
-        // buffer.  This should only loop a lot when the firmware configuration changes,
-        // after that it should find the index to update very quickly.
-        let idx = 'outer: loop {
-            let mut idx = unsafe { HVS_DISPLIST0.read_volatile() as usize };
-            'inner: loop {
-                let ctrl = unsafe { HVS_DISPLIST_BUF.add(idx).read_volatile() };
-                // Look for a plane with unity scaling.
-                if ctrl >> 15 & 0x1 != 0 {
-                    // Check whether this plane contains one of our frame buffers.
-                    let fb = unsafe { HVS_DISPLIST_BUF.add(idx + 5).read_volatile() };
-                    if fb == cfb || fb == ofb {
-                        // Found the index to update.
-                        break 'outer idx + 5;
+            // Look for the index of the frame buffer pointers in the HVS display list
+            // buffer.  This should only loop a lot when the firmware configuration changes,
+            // after that it should find the index to update very quickly.
+            let idx = 'outer: loop {
+                let mut idx = unsafe { HVS_DISPLIST0.read_volatile() as usize };
+                'inner: loop {
+                    let ctrl = unsafe { HVS_DISPLIST_BUF.add(idx).read_volatile() };
+                    // Look for a plane with unity scaling.
+                    if ctrl >> 15 & 0x1 != 0 {
+                        // Check whether this plane contains one of our frame buffers.
+                        let fb = unsafe { HVS_DISPLIST_BUF.add(idx + 5).read_volatile() };
+                        if fb == cfb || fb == ofb {
+                            // Found the index to update.
+                            break 'outer idx + 5;
+                        }
                     }
+                    // Check whether this is an end control word.
+                    if ctrl >> 30 == 0x2 {
+                        break 'inner;
+                    }
+                    // Skip to the next plane.
+                    idx += (ctrl >> 24 & 0x3F) as usize;
                 }
-                // Check whether this is an end control word.
-                if ctrl >> 30 == 0x2 {
-                    break 'inner;
-                }
-                // Skip to the next plane.
-                idx += (ctrl >> 24 & 0x3F) as usize;
-            }
-        };
-        VIDEO.cfb.store(ofb, Ordering::Relaxed);
-        unsafe { HVS_DISPLIST_BUF.add(idx).write_volatile(ofb) };
+            };
+            VIDEO.cfb.store(ofb, Ordering::Relaxed);
+            unsafe { HVS_DISPLIST_BUF.add(idx).write_volatile(ofb) };
+        }
         VIDEO.did_commit.store(false, Ordering::SeqCst);
+        VIDEO.frame.store(VIDEO.fb.frame(), Ordering::SeqCst);
         let mut waiters = VIDEO.waiters.lock();
         waiters.iter().for_each(|waker| waker.wake_by_ref());
         waiters.clear();
@@ -320,7 +327,7 @@ impl Future for VerticalSync
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<()>
     {
-        let frame = VIDEO.fb.frame();
+        let frame = VIDEO.frame.load(Ordering::Relaxed);
         if frame != self.frame {
             return Poll::Ready(());
         }
