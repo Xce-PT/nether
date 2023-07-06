@@ -7,9 +7,9 @@ use core::alloc::Layout;
 use core::arch::aarch64::*;
 use core::iter::Iterator;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
-use crate::sync::Lock;
 use crate::to_dma;
 
 /// Maximum width or height of a tile.
@@ -33,8 +33,12 @@ pub struct FrameBuffer
     twidth: usize,
     /// Tile height.
     theight: usize,
-    /// Controls.
-    ctrl: Lock<Control>,
+    /// Tile count.
+    tcount: usize,
+    /// Id of the next tile to draw.
+    tnext: AtomicU64,
+    /// Finished tile counter.
+    tfinished: AtomicU64,
 }
 
 /// Frame buffer iterator.
@@ -49,16 +53,16 @@ pub struct FrameBufferIterator<'a>
 /// Frame buffer tile.
 pub struct Tile<'a>
 {
-    /// Frame buffer that this tile draws on.
+    /// Frame buffer that this tile draws to.
     fb: &'a FrameBuffer,
     /// Origin column for this tile.
     col: usize,
     /// Origin row for this tile.
     row: usize,
     /// Tile's color buffer.
-    cb: [u16; TILE_DIM_MAX * TILE_DIM_MAX],
+    cb: Buffer,
     /// Tile's depth buffer.
-    db: [u16; TILE_DIM_MAX * TILE_DIM_MAX],
+    db: Buffer,
 }
 
 /// Vertex.
@@ -71,17 +75,10 @@ pub struct Vertex
     pub color: float32x4_t,
 }
 
-/// Frame buffer control.
+/// Tile buffer.
+#[repr(align(0x40), C)]
 #[derive(Debug)]
-struct Control
-{
-    /// Current frame ID.
-    frame: u64,
-    /// Next tile ID.
-    tnext: usize,
-    /// Count of finished tiles in the current frame.
-    tfinished: usize,
-}
+struct Buffer([u16; TILE_DIM_MAX * TILE_DIM_MAX]);
 
 impl FrameBuffer
 {
@@ -113,22 +110,21 @@ impl FrameBuffer
         let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16>() };
         assert!(!fb0.is_null() && !fb1.is_null(),
                 "Failed to allocate memory for the frame buffers");
-        let ctrl = Control { frame: 0,
-                             tnext: 0,
-                             tfinished: 0 };
         Self { fb0,
                fb1,
                width,
                height,
                twidth,
                theight,
-               ctrl: Lock::new(ctrl) }
+               tcount: width * height / (twidth * theight),
+               tnext: AtomicU64::new(0),
+               tfinished: AtomicU64::new(0) }
     }
 
     /// Returns the current frame ID.
     pub fn frame(&self) -> u64
     {
-        self.ctrl.lock().frame
+        self.tfinished.load(Ordering::Relaxed) / self.tcount as u64
     }
 
     /// Creates an iterator of tiles awaiting to be drawn.
@@ -139,17 +135,12 @@ impl FrameBuffer
         FrameBufferIterator::new(self)
     }
 
-    /// Returns the DMA address of the frame buffer not currently being drawn,
-    /// flipping them beforehand if drawing has finished.
+    /// Returns the DMA address of the frame buffer not currently being drawn
+    /// to.
     pub fn vsync(&self) -> u32
     {
-        let mut ctrl = self.ctrl.lock();
-        if ctrl.tfinished == self.width * self.height / (self.twidth * self.theight) {
-            ctrl.tnext = 0;
-            ctrl.tfinished = 0;
-            ctrl.frame += 1;
-        };
-        if ctrl.frame & 0x1 == 0 {
+        let frame = self.frame();
+        if frame & 0x1 == 0 {
             return to_dma(self.fb0 as _) as _;
         }
         to_dma(self.fb1 as _) as _
@@ -181,8 +172,7 @@ impl<'a> FrameBufferIterator<'a>
     /// Returns the newly created iterator.
     fn new(fb: &'a FrameBuffer) -> Self
     {
-        Self { fb,
-               frame: fb.ctrl.lock().frame }
+        Self { fb, frame: fb.frame() }
     }
 }
 
@@ -192,16 +182,20 @@ impl<'a> Iterator for FrameBufferIterator<'a>
 
     fn next(&mut self) -> Option<Tile<'a>>
     {
-        let mut ctrl = self.fb.ctrl.lock();
-        if self.frame != ctrl.frame {
-            return None;
-        }
-        let id = ctrl.tnext;
-        if id >= self.fb.width * self.fb.height / (self.fb.twidth * self.fb.theight) {
-            return None;
-        }
-        ctrl.tnext += 1;
-        Some(Tile::new(self.fb, id))
+        let tnext = loop {
+            let tnext = self.fb.tnext.load(Ordering::Relaxed);
+            if tnext / self.fb.tcount as u64 != self.frame {
+                return None;
+            };
+            if self.fb
+                   .tnext
+                   .compare_exchange(tnext, tnext + 1, Ordering::Relaxed, Ordering::Relaxed)
+                   .is_ok()
+            {
+                break tnext;
+            }
+        };
+        Some(Tile::new(self.fb, tnext))
     }
 }
 
@@ -213,16 +207,13 @@ impl<'a> Tile<'a>
     /// * `id`: ID of the tile.
     ///
     /// Returns the newly created tile.
-    ///
-    /// Panics if the specified tile identifier is outside the valid range.
-    #[track_caller]
-    fn new(fb: &'a FrameBuffer, id: usize) -> Self
+    fn new(fb: &'a FrameBuffer, id: u64) -> Self
     {
-        let col = id * fb.twidth % fb.width;
-        let row = id * fb.twidth / fb.width * fb.theight;
-        assert!(row < fb.height, "Invalid tile ID: {id}");
-        let cb = [0; TILE_DIM_MAX * TILE_DIM_MAX];
-        let db = [0; TILE_DIM_MAX * TILE_DIM_MAX];
+        let pos = id as usize % fb.tcount;
+        let col = pos * fb.twidth % fb.width;
+        let row = pos * fb.twidth / fb.width * fb.theight;
+        let cb = Buffer([0; TILE_DIM_MAX * TILE_DIM_MAX]);
+        let db = Buffer([0; TILE_DIM_MAX * TILE_DIM_MAX]);
         Self { fb, col, row, cb, db }
     }
 
@@ -326,6 +317,8 @@ impl<'a> Tile<'a>
             let mut vbary1 = vld1q_f32([ctl1, ctl1 + hdiff1, ctl1 + hdiff1 + hdiff1, ctl1 + hdiff1 * 3.0].as_ptr());
             let mut vbary2 = vld1q_f32([ctl2, ctl2 + hdiff2, ctl2 + hdiff2 + hdiff2, ctl2 + hdiff2 * 3.0].as_ptr());
             for row in 0 .. self.fb.theight {
+                asm!("prfm pstl1keep, [{addr}]", addr = in (reg) self.cb.0.as_mut_ptr().add(row * 32));
+                asm!("prfm pstl1keep, [{addr}]", addr = in (reg) self.db.0.as_mut_ptr().add(row * 32));
                 let mut hbary0 = vbary0;
                 let mut hbary1 = vbary1;
                 let mut hbary2 = vbary2;
@@ -405,7 +398,7 @@ impl<'a> Tile<'a>
                         // Store the valid pixels in the tile.
                         let offset = row * self.fb.twidth + col;
                         let valid = vmovn_u32(valid);
-                        let od = vld1_u16(self.db.as_ptr().add(offset));
+                        let od = vld1_u16(self.db.0.as_ptr().add(offset));
                         let d = vreinterpretq_u32_f32(z);
                         let dx = vshrq_n_u32(d, 14);
                         let dm = vshrq_n_u32(d, 12);
@@ -415,11 +408,11 @@ impl<'a> Tile<'a>
                         let cond = vcgt_u16(d, od);
                         let valid = vand_u16(valid, cond);
                         let d = vbsl_u16(valid, d, od);
-                        vst1_u16(self.db.as_mut_ptr().add(offset), d);
+                        vst1_u16(self.db.0.as_mut_ptr().add(offset), d);
                         let rgb565 = vmovn_u32(rgb565);
-                        let orgb565 = vld1_u16(self.cb.as_ptr().add(offset));
+                        let orgb565 = vld1_u16(self.cb.0.as_ptr().add(offset));
                         let rgb565 = vbsl_u16(valid, rgb565, orgb565);
-                        vst1_u16(self.cb.as_mut_ptr().add(offset), rgb565);
+                        vst1_u16(self.cb.0.as_mut_ptr().add(offset), rgb565);
                     }
                     hbary0 = vaddq_f32(hbary0, hinc0);
                     hbary1 = vaddq_f32(hbary1, hinc1);
@@ -437,7 +430,7 @@ impl<'a> Drop for Tile<'a>
 {
     fn drop(&mut self)
     {
-        let buf = if self.fb.ctrl.lock().frame & 0x1 == 0 {
+        let buf = if self.fb.frame() & 0x1 == 0 {
             self.fb.fb1
         } else {
             self.fb.fb0
@@ -446,10 +439,10 @@ impl<'a> Drop for Tile<'a>
         for trow in 0 .. self.fb.theight {
             unsafe {
                 let buf = buf.add(trow * self.fb.width);
-                let cb = self.cb.as_ptr().add(trow * self.fb.twidth);
+                let cb = self.cb.0.as_ptr().add(trow * self.fb.twidth);
                 cb.copy_to_nonoverlapping(buf, self.fb.twidth);
             }
         }
-        self.fb.ctrl.lock().tfinished += 1;
+        self.fb.tfinished.fetch_add(1, Ordering::Relaxed);
     }
 }
