@@ -78,6 +78,14 @@ impl Vector
     {
         unsafe { transmute(self.raw) }
     }
+
+    /// Returns the inner portable SIMD data.
+    #[cfg(not(test))]
+    #[inline]
+    pub fn into_simd(self) -> f32x4
+    {
+        self.raw
+    }
 }
 
 impl From<[f32; 4]> for Vector

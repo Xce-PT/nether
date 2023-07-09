@@ -1,12 +1,19 @@
 //! Frame buffer rendering target.
+//!
+//! Expects triangles with X and Y in screen coordinates with an inverted Z
+//! where the near clipping plane is at 1 and the far clipping plane is at 0,
+//! and draws them to cached tiles of up to 32x32 pixels. Color pixels are
+//! stored in the 16 bit little endian integer RGB565 format, whereas depth
+//! pixels are stored in a custom 16-bit floating point format with just a 5-bit
+//! exponent and 11-bit mantissa.
 
 extern crate alloc;
 
 use alloc::alloc::GlobalAlloc;
 use core::alloc::Layout;
-use core::arch::aarch64::*;
 use core::iter::Iterator;
 use core::mem::size_of;
+use core::simd::{f32x4, u16x4, u32x4, SimdFloat, SimdPartialEq, SimdPartialOrd, SimdUint};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
@@ -59,6 +66,10 @@ pub struct Tile<'a>
     col: usize,
     /// Origin row for this tile.
     row: usize,
+    /// X control point coordinates.
+    xctl: f32x4,
+    /// Y control point coordinates.
+    yctl: f32x4,
     /// Tile's color buffer.
     cb: Buffer,
     /// Tile's depth buffer.
@@ -70,9 +81,9 @@ pub struct Tile<'a>
 pub struct Vertex
 {
     /// Projected position.
-    pub proj: float32x4_t,
+    pub proj: f32x4,
     /// RGBA color.
-    pub color: float32x4_t,
+    pub color: f32x4,
 }
 
 /// Tile buffer.
@@ -135,8 +146,7 @@ impl FrameBuffer
         FrameBufferIterator::new(self)
     }
 
-    /// Returns the DMA address of the frame buffer not currently being drawn
-    /// to.
+    /// Returns the DMA address of the frame buffer not currently being drawn.
     pub fn vsync(&self) -> u32
     {
         let frame = self.frame();
@@ -212,9 +222,23 @@ impl<'a> Tile<'a>
         let pos = id as usize % fb.tcount;
         let col = pos * fb.twidth % fb.width;
         let row = pos * fb.twidth / fb.width * fb.theight;
+        let xdist = fb.twidth as f32;
+        let ydist = fb.theight as f32;
+        let xmin = col as f32;
+        let ymin = row as f32;
+        let xmax = xmin + xdist;
+        let ymax = ymin + ydist;
+        let xctl = f32x4::from([xmin, xmax, xmin, xmax]);
+        let yctl = f32x4::from([ymin, ymin, ymax, ymax]);
         let cb = Buffer([0; TILE_DIM_MAX * TILE_DIM_MAX]);
         let db = Buffer([0; TILE_DIM_MAX * TILE_DIM_MAX]);
-        Self { fb, col, row, cb, db }
+        Self { fb,
+               col,
+               row,
+               xctl,
+               yctl,
+               cb,
+               db }
     }
 
     /// Draws a triangle to the tile.
@@ -224,204 +248,166 @@ impl<'a> Tile<'a>
     /// * `vert2`: Third vertex.
     pub fn draw_triangle(&mut self, vert0: Vertex, vert1: Vertex, vert2: Vertex)
     {
-        unsafe {
-            // Skip if the bounding rectangle of the triangle is completely outside the
-            // tile.
-            let fcol = self.col as f32;
-            let frow = self.row as f32;
-            let min = vminq_f32(vert0.proj, vert1.proj);
-            let min = vminq_f32(min, vert2.proj);
-            let max = vmaxq_f32(vert0.proj, vert1.proj);
-            let max = vmaxq_f32(max, vert2.proj);
-            let tmin = vld1q_f32([fcol, frow, 0.0, 0.0].as_ptr());
-            let tmax = vld1q_f32([fcol + self.fb.twidth as f32,
-                                  frow + self.fb.theight as f32,
-                                  1.0,
-                                  f32::INFINITY].as_ptr());
-            let cond0 = vcgtq_f32(tmax, min);
-            let cond1 = vcltq_f32(tmin, max);
-            let cond = vandq_u32(cond0, cond1);
-            if vminvq_u32(cond) == 0 {
-                return;
-            }
-            // Determine the linear barycentric coordinates of the four control points.
-            let one = vdupq_n_f32(1.0);
-            let x0 = vdupq_laneq_f32(vert0.proj, 0);
-            let y0 = vdupq_laneq_f32(vert0.proj, 1);
-            let x1 = vdupq_laneq_f32(vert1.proj, 0);
-            let y1 = vdupq_laneq_f32(vert1.proj, 1);
-            let x2 = vdupq_laneq_f32(vert2.proj, 0);
-            let y2 = vdupq_laneq_f32(vert2.proj, 1);
-            let vfcol = vdupq_n_f32(fcol);
-            let vfrow = vdupq_n_f32(frow);
-            let ftwidth = self.fb.twidth as f32 - 0.5;
-            let ftheight = self.fb.theight as f32 - 0.5;
-            let ptx = vld1q_f32([0.5, ftwidth, 0.5, ftwidth].as_ptr());
-            let ptx = vaddq_f32(ptx, vfcol);
-            let pty = vld1q_f32([0.5, 0.5, ftheight, ftheight].as_ptr());
-            let pty = vaddq_f32(pty, vfrow);
-            let x0 = vsubq_f32(x0, ptx);
-            let y0 = vsubq_f32(y0, pty);
-            let x1 = vsubq_f32(x1, ptx);
-            let y1 = vsubq_f32(y1, pty);
-            let x2 = vsubq_f32(x2, ptx);
-            let y2 = vsubq_f32(y2, pty);
-            let area0 = vmulq_f32(x1, y2);
-            let area0 = vmlsq_f32(area0, x2, y1);
-            let area1 = vmulq_f32(x2, y0);
-            let area1 = vmlsq_f32(area1, x0, y2);
-            let area2 = vmulq_f32(x0, y1);
-            let area2 = vmlsq_f32(area2, x1, y0);
-            if vmaxvq_f32(area0) < 0.0 || vmaxvq_f32(area1) < 0.0 || vmaxvq_f32(area2) < 0.0 {
-                // Triangle is completely outside this tile.
-                return;
-            }
-            let area = vaddq_f32(area0, area1);
-            let area = vaddq_f32(area, area2);
-            let invarea = vdivq_f32(one, area);
-            let bary0 = vmulq_f32(area0, invarea);
-            let bary1 = vmulq_f32(area1, invarea);
-            let bary2 = vmulq_f32(area2, invarea);
-            // Compute the linear barycentric coordinate increments.
-            let invtwidth = 1.0 / (ftwidth - 0.5);
-            let invtheight = 1.0 / (ftheight - 0.5);
-            let ctl0 = vgetq_lane_f32(bary0, 0);
-            let hdiff0 = vgetq_lane_f32(bary0, 1);
-            let hdiff0 = hdiff0 - ctl0;
-            let hdiff0 = hdiff0 * invtwidth;
-            let vdiff0 = vgetq_lane_f32(bary0, 2);
-            let vdiff0 = vdiff0 - ctl0;
-            let vdiff0 = vdiff0 * invtheight;
-            let ctl1 = vgetq_lane_f32(bary1, 0);
-            let hdiff1 = vgetq_lane_f32(bary1, 1);
-            let hdiff1 = hdiff1 - ctl1;
-            let hdiff1 = hdiff1 * invtwidth;
-            let vdiff1 = vgetq_lane_f32(bary1, 2);
-            let vdiff1 = vdiff1 - ctl1;
-            let vdiff1 = vdiff1 * invtheight;
-            let ctl2 = vgetq_lane_f32(bary2, 0);
-            let hdiff2 = vgetq_lane_f32(bary2, 1);
-            let hdiff2 = hdiff2 - ctl2;
-            let hdiff2 = hdiff2 * invtwidth;
-            let vdiff2 = vgetq_lane_f32(bary2, 2);
-            let vdiff2 = vdiff2 - ctl2;
-            let vdiff2 = vdiff2 * invtheight;
-            let hinc0 = vdupq_n_f32(hdiff0 * 4.0);
-            let vinc0 = vdupq_n_f32(vdiff0);
-            let hinc1 = vdupq_n_f32(hdiff1 * 4.0);
-            let vinc1 = vdupq_n_f32(vdiff1);
-            let hinc2 = vdupq_n_f32(hdiff2 * 4.0);
-            let vinc2 = vdupq_n_f32(vdiff2);
-            // Loop over all the fragments in the tile, drawing them in groups of 4.
-            let mut vbary0 = vld1q_f32([ctl0, ctl0 + hdiff0, ctl0 + hdiff0 + hdiff0, ctl0 + hdiff0 * 3.0].as_ptr());
-            let mut vbary1 = vld1q_f32([ctl1, ctl1 + hdiff1, ctl1 + hdiff1 + hdiff1, ctl1 + hdiff1 * 3.0].as_ptr());
-            let mut vbary2 = vld1q_f32([ctl2, ctl2 + hdiff2, ctl2 + hdiff2 + hdiff2, ctl2 + hdiff2 * 3.0].as_ptr());
-            for row in 0 .. self.fb.theight {
-                asm!("prfm pstl1keep, [{addr}]", addr = in (reg) self.cb.0.as_mut_ptr().add(row * 32));
-                asm!("prfm pstl1keep, [{addr}]", addr = in (reg) self.db.0.as_mut_ptr().add(row * 32));
-                let mut hbary0 = vbary0;
-                let mut hbary1 = vbary1;
-                let mut hbary2 = vbary2;
-                for col in (0 .. self.fb.twidth).step_by(4) {
-                    // Invalidate all the fragments outside the triangle.
-                    let valid0 = vcgezq_f32(hbary0);
-                    let valid1 = vcgezq_f32(hbary1);
-                    let valid2 = vcgezq_f32(hbary2);
-                    let valid = vandq_u32(valid0, valid1);
-                    let valid = vandq_u32(valid, valid2);
-                    // Also invalidate fragments at the bottom or left edges.
-                    let cond0 = vcltzq_f32(hinc0);
-                    let cond1 = vcltzq_f32(vinc0);
-                    let cond2 = vceqzq_f32(hbary0);
-                    let cond2 = vmvnq_u32(cond2);
-                    let cond = vandq_u32(cond0, cond1);
-                    let cond = vorrq_u32(cond, cond2);
-                    let valid = vandq_u32(valid, cond);
-                    let cond0 = vcltzq_f32(hinc1);
-                    let cond1 = vcltzq_f32(vinc1);
-                    let cond2 = vceqzq_f32(hbary1);
-                    let cond2 = vmvnq_u32(cond2);
-                    let cond = vandq_u32(cond0, cond1);
-                    let cond = vorrq_u32(cond, cond2);
-                    let valid = vandq_u32(valid, cond);
-                    let cond0 = vcltzq_f32(hinc2);
-                    let cond1 = vcltzq_f32(vinc2);
-                    let cond2 = vceqzq_f32(hbary2);
-                    let cond2 = vmvnq_u32(cond2);
-                    let cond = vandq_u32(cond0, cond1);
-                    let cond = vorrq_u32(cond, cond2);
-                    let valid = vandq_u32(valid, cond);
-                    if vmaxvq_u32(valid) > 0 {
-                        // Compute the perspective-correct barycentric coordinates.
-                        let w0 = vdupq_laneq_f32(vert0.proj, 3);
-                        let w0 = vmulq_f32(w0, hbary0);
-                        let w1 = vdupq_laneq_f32(vert1.proj, 3);
-                        let w1 = vmulq_f32(w1, hbary1);
-                        let w2 = vdupq_laneq_f32(vert2.proj, 3);
-                        let w2 = vmulq_f32(w2, hbary2);
-                        let wp = vaddq_f32(w0, w1);
-                        let wp = vaddq_f32(wp, w2);
-                        let wp = vdivq_f32(one, wp);
-                        let bary0 = vmulq_f32(w0, wp);
-                        let bary1 = vmulq_f32(w1, wp);
-                        let bary2 = vmulq_f32(w2, wp);
-                        // Compute the Z component, discarding any fragments outside the clip range.
-                        let z = vmulq_laneq_f32(bary0, vert0.proj, 2);
-                        let z = vmlaq_laneq_f32(z, bary1, vert1.proj, 2);
-                        let z = vmlaq_laneq_f32(z, bary2, vert2.proj, 2);
-                        let cond0 = vcgezq_f32(z);
-                        let cond1 = vcleq_f32(z, one);
-                        let valid = vandq_u32(valid, cond0);
-                        let valid = vandq_u32(valid, cond1);
-                        // Compute the color values.
-                        let maxrb = vdupq_n_f32(31.5);
-                        let maxg = vdupq_n_f32(63.5);
-                        let red = vmulq_laneq_f32(bary0, vert0.color, 0);
-                        let red = vmlaq_laneq_f32(red, bary1, vert1.color, 0);
-                        let red = vmlaq_laneq_f32(red, bary2, vert2.color, 0);
-                        let red = vmulq_f32(red, maxrb);
-                        let red = vcvtq_u32_f32(red);
-                        let red = vshlq_n_u32(red, 11);
-                        let green = vmulq_laneq_f32(bary0, vert0.color, 1);
-                        let green = vmlaq_laneq_f32(green, bary1, vert1.color, 1);
-                        let green = vmlaq_laneq_f32(green, bary2, vert2.color, 1);
-                        let green = vmulq_f32(green, maxg);
-                        let green = vcvtq_u32_f32(green);
-                        let green = vshlq_n_u32(green, 5);
-                        let blue = vmulq_laneq_f32(bary0, vert0.color, 2);
-                        let blue = vmlaq_laneq_f32(blue, bary1, vert1.color, 2);
-                        let blue = vmlaq_laneq_f32(blue, bary2, vert2.color, 2);
-                        let blue = vmulq_f32(blue, maxrb);
-                        let blue = vcvtq_u32_f32(blue);
-                        let rgb565 = vorrq_u32(red, green);
-                        let rgb565 = vorrq_u32(rgb565, blue);
-                        // Store the valid pixels in the tile.
-                        let offset = row * self.fb.twidth + col;
-                        let valid = vmovn_u32(valid);
-                        let od = vld1_u16(self.db.0.as_ptr().add(offset));
-                        let d = vreinterpretq_u32_f32(z);
-                        let dx = vshrq_n_u32(d, 14);
-                        let dm = vshrq_n_u32(d, 12);
-                        let fm = vdupq_n_u32(0xF800);
-                        let d = vbslq_u32(fm, dx, dm);
-                        let d = vmovn_u32(d);
-                        let cond = vcgt_u16(d, od);
-                        let valid = vand_u16(valid, cond);
-                        let d = vbsl_u16(valid, d, od);
-                        vst1_u16(self.db.0.as_mut_ptr().add(offset), d);
-                        let rgb565 = vmovn_u32(rgb565);
-                        let orgb565 = vld1_u16(self.cb.0.as_ptr().add(offset));
-                        let rgb565 = vbsl_u16(valid, rgb565, orgb565);
-                        vst1_u16(self.cb.0.as_mut_ptr().add(offset), rgb565);
-                    }
-                    hbary0 = vaddq_f32(hbary0, hinc0);
-                    hbary1 = vaddq_f32(hbary1, hinc1);
-                    hbary2 = vaddq_f32(hbary2, hinc2);
+        let ptx = self.xctl;
+        let pty = self.yctl;
+        // Check whether the triangle's axis aligned bounding box overlaps this tile.
+        let tri_max = vert0.proj.simd_max(vert1.proj).simd_max(vert2.proj);
+        let tile_min = f32x4::from([ptx[0], pty[0], 0.0, 0.0]);
+        if tri_max.simd_lt(tile_min).any() {
+            // Triangle is guaranteed to be completely outside this tile.
+            return;
+        }
+        let tri_min = vert0.proj.simd_min(vert1.proj).simd_min(vert2.proj);
+        let tile_max = f32x4::from([ptx[3], pty[3], 1.0, f32::INFINITY]);
+        if tri_min.simd_gt(tile_max).any() {
+            // Triangle is completely outside this tile.
+            return;
+        }
+        // Compute the linear barycentric coordinates of the fragments at the tile's
+        // corners.
+        let x0 = f32x4::splat(vert0.proj[0]) - ptx;
+        let y0 = f32x4::splat(vert0.proj[1]) - pty;
+        let x1 = f32x4::splat(vert1.proj[0]) - ptx;
+        let y1 = f32x4::splat(vert1.proj[1]) - pty;
+        let x2 = f32x4::splat(vert2.proj[0]) - ptx;
+        let y2 = f32x4::splat(vert2.proj[1]) - pty;
+        let area0 = x1 * y2 - x2 * y1;
+        if area0.reduce_max() < 0.0 {
+            // The whole triangle is outside the tile.
+            return;
+        }
+        let area1 = x2 * y0 - x0 * y2;
+        if area1.reduce_max() < 0.0 {
+            // The whole triangle is outside the tile.
+            return;
+        }
+        let area2 = x0 * y1 - x1 * y0;
+        if area2.reduce_max() < 0.0 {
+            // The whole triangle is outside the tile.
+            return;
+        }
+        let total_recip = (area0 + area1 + area2).recip();
+        let mut bary0 = area0 * total_recip;
+        let mut bary1 = area1 * total_recip;
+        let mut bary2 = area2 * total_recip;
+        // Compute the linear barycentric coordinate increments.
+        let twidth = self.fb.twidth;
+        let theight = self.fb.theight;
+        let xdiv = (twidth as f32).recip();
+        let ydiv = (theight as f32).recip();
+        let hinc0 = (bary0[1] - bary0[0]) * xdiv;
+        let vinc0 = (bary0[2] - bary0[0]) * ydiv;
+        bary0[0] += hinc0 * 0.5 + vinc0 * 0.5;
+        bary0[1] = bary0[0] + hinc0;
+        bary0[2] = bary0[1] + hinc0;
+        bary0[3] = bary0[2] + hinc0;
+        let hinc0 = f32x4::splat(hinc0 * 4.0);
+        let vinc0 = f32x4::splat(vinc0);
+        let hinc1 = (bary1[1] - bary1[0]) * xdiv;
+        let vinc1 = (bary1[2] - bary1[0]) * ydiv;
+        bary1[0] += hinc1 * 0.5 + vinc1 * 0.5;
+        bary1[1] = bary1[0] + hinc1;
+        bary1[2] = bary1[1] + hinc1;
+        bary1[3] = bary1[2] + hinc1;
+        let hinc1 = f32x4::splat(hinc1 * 4.0);
+        let vinc1 = f32x4::splat(vinc1);
+        let hinc2 = (bary2[1] - bary2[0]) * xdiv;
+        let vinc2 = (bary2[2] - bary2[0]) * ydiv;
+        bary2[0] += hinc2 * 0.5 + vinc2 * 0.5;
+        bary2[1] = bary2[0] + hinc2;
+        bary2[2] = bary2[1] + hinc2;
+        bary2[3] = bary2[2] + hinc2;
+        let hinc2 = f32x4::splat(hinc2 * 4.0);
+        let vinc2 = f32x4::splat(vinc2);
+        // Loop over all the pixels in the tile in groups of 4, and shade those that
+        // belong to the triangle.
+        let mut vbary0 = bary0;
+        let mut vbary1 = bary1;
+        let mut vbary2 = bary2;
+        let zero = f32x4::splat(0.0);
+        let one = f32x4::splat(1.0);
+        let dxm = u32x4::splat(0x3F800000);
+        let dxb = u32x4::splat(0x30000000);
+        let dmm = u32x4::splat(0x7FF000);
+        let ds = u32x4::splat(12);
+        let rbmul = f32x4::splat(31.5);
+        let gmul = f32x4::splat(63.5);
+        let rshift = u32x4::splat(11);
+        let gshift = u32x4::splat(5);
+        for trow in 0 .. theight {
+            let mut hbary0 = vbary0;
+            let mut hbary1 = vbary1;
+            let mut hbary2 = vbary2;
+            for tcol in (0 .. twidth).step_by(4) {
+                let offset = trow * twidth + tcol;
+                // Fill the triangle.
+                let mut valid = hbary0.simd_gt(zero) & hbary1.simd_gt(zero) & hbary2.simd_gt(zero);
+                // Also draw the top, top-right, right, and bottom-right edges.
+                if (hbary0.simd_eq(zero) | hbary1.simd_eq(zero) | hbary2.simd_eq(zero)).any() {
+                    valid |= hbary0.simd_eq(zero) & (hinc0.simd_lt(zero) | hinc0.simd_eq(zero) & vinc0.simd_lt(zero));
+                    valid |= hbary1.simd_eq(zero) & (hinc1.simd_lt(zero) | hinc1.simd_eq(zero) & vinc1.simd_lt(zero));
+                    valid |= hbary2.simd_eq(zero) & (hinc2.simd_lt(zero) | hinc2.simd_eq(zero) & vinc2.simd_lt(zero));
                 }
-                vbary0 = vaddq_f32(vbary0, vinc0);
-                vbary1 = vaddq_f32(vbary1, vinc1);
-                vbary2 = vaddq_f32(vbary2, vinc2);
+                // Compute the perspective-correct barycentric coordinates.
+                let w0 = f32x4::splat(vert0.proj[3]) * hbary0;
+                let w1 = f32x4::splat(vert1.proj[3]) * hbary1;
+                let w2 = f32x4::splat(vert2.proj[3]) * hbary2;
+                let wp = w0 + w1 + w2;
+                let bary0 = w0 * wp;
+                let bary1 = w1 * wp;
+                let bary2 = w2 * wp;
+                // Compute the depth and exclude all fragments outside the range between the
+                // values in the depth buffer and the near clipping plane.
+                let db = unsafe { self.db.0.as_mut_ptr().add(offset).cast::<u16x4>() };
+                let odepth = unsafe { db.read() };
+                let z0 = f32x4::splat(vert0.proj[2]) * bary0;
+                let z1 = f32x4::splat(vert1.proj[2]) * bary1;
+                let z2 = f32x4::splat(vert2.proj[2]) * bary2;
+                let z = z0 + z1 + z2;
+                valid &= z.simd_le(one);
+                let zb = z.to_bits().saturating_sub(dxb);
+                let zx = (zb & dxm) >> ds;
+                let zm = (zb & dmm) >> ds;
+                let depth = (zx | zm).cast::<u16>();
+                let mut valid = valid.cast::<i16>();
+                valid &= depth.simd_gt(odepth);
+                if valid.any() {
+                    // Store the new depth values.
+                    let depth = valid.select(depth, odepth);
+                    unsafe { db.write(depth) };
+                    // Apply shading.
+                    let cb = unsafe { self.cb.0.as_mut_ptr().add(offset).cast::<u16x4>() };
+                    let ocolor = unsafe { cb.read() };
+                    let red0 = f32x4::splat(vert0.color[0]) * bary0;
+                    let red1 = f32x4::splat(vert1.color[0]) * bary1;
+                    let red2 = f32x4::splat(vert2.color[0]) * bary2;
+                    let red = red0 + red1 + red2;
+                    let red = red.simd_max(zero).simd_min(one);
+                    let green0 = f32x4::splat(vert0.color[1]) * bary0;
+                    let green1 = f32x4::splat(vert1.color[1]) * bary1;
+                    let green2 = f32x4::splat(vert2.color[1]) * bary2;
+                    let green = green0 + green1 + green2;
+                    let green = green.simd_max(zero).simd_min(one);
+                    let blue0 = f32x4::splat(vert0.color[2]) * bary0;
+                    let blue1 = f32x4::splat(vert1.color[2]) * bary1;
+                    let blue2 = f32x4::splat(vert2.color[2]) * bary2;
+                    let blue = blue0 + blue1 + blue2;
+                    let blue = blue.simd_max(zero).simd_min(one);
+                    // Compute the RGB565 color values.
+                    let red = (red * rbmul).cast::<u32>() << rshift;
+                    let green = (green * gmul).cast::<u32>() << gshift;
+                    let blue = (blue * rbmul).cast::<u32>();
+                    let color = (red | green | blue).cast::<u16>();
+                    let color = valid.select(color, ocolor);
+                    unsafe { cb.write(color) };
+                }
+                hbary0 += hinc0;
+                hbary1 += hinc1;
+                hbary2 += hinc2;
             }
+            vbary0 += vinc0;
+            vbary1 += vinc1;
+            vbary2 += vinc2;
         }
     }
 }

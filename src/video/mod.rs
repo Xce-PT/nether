@@ -105,7 +105,7 @@ struct VerticalSync
 struct Command
 {
     /// Projected vertices.
-    proj: Vec<ProjectedVertex>,
+    proj: Vec<[ProjectedVertex; 3]>,
 }
 
 /// Set plane property.
@@ -218,10 +218,20 @@ impl Video
             let recip = proj[3].recip();
             proj *= recip;
             proj[3] = recip;
-            ProjectedVertex { proj: proj.into_intrinsic(),
-                              color: vert.color.into_intrinsic() }
+            ProjectedVertex { proj: proj.into_simd(),
+                              color: vert.color.into_simd() }
         };
-        let proj = Vec::from_iter(verts.iter().map(map));
+        let filter = |verts: &[ProjectedVertex; 3]| {
+            let vert1 = verts[1].proj - verts[0].proj;
+            let vert2 = verts[2].proj - verts[0].proj;
+            let area = vert1[0] * vert2[1] - vert1[1] * vert2[0];
+            area > 0.0
+        };
+        let proj = verts.iter()
+                        .map(map)
+                        .array_chunks::<3>()
+                        .filter(filter)
+                        .collect::<Vec<_>>();
         let cmd = Command { proj };
         self.cmds.wlock().push(cmd);
     }
@@ -254,8 +264,8 @@ impl Video
         for mut tile in self.fb.tiles() {
             let cmds = self.cmds.rlock();
             for cmd in cmds.iter() {
-                for proj in cmd.proj.iter().array_chunks::<3>() {
-                    tile.draw_triangle(*proj[0], *proj[1], *proj[2]);
+                for proj in cmd.proj.iter() {
+                    tile.draw_triangle(proj[0], proj[1], proj[2]);
                 }
             }
         }
