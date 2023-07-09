@@ -101,7 +101,7 @@ impl Mul<Matrix> for Vector
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
             let this = transmute::<_, float32x4_t>(self.raw);
-            let that = transmute::<_, float32x4x4_t>(other.raw);
+            let that = other.raw;
             let raw = vmulq_laneq_f32(that.0, this, 0);
             let raw = vmlaq_laneq_f32(raw, that.1, this, 1);
             let raw = vmlaq_laneq_f32(raw, that.2, this, 2);
