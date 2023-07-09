@@ -105,7 +105,7 @@ impl Mul<Quaternion> for Vector
         let mut vec = self;
         let w = vec[3];
         vec[3] = 0.0;
-        vec = vec * mat;
+        vec *= mat;
         vec[3] = w;
         vec
     }

@@ -37,7 +37,8 @@ fi
 
 echo "Compiling $name..."
 if test -z "`which clippy-driver`" -o -z "`clippy-driver +nightly -V 2>/dev/null`"; then
-    eval clippy-driver $flags $binflags src/main.rs || exit 1
-else
+    echo "Warning: Clippy for nightly Rust does not appear to be properly installed." >&2
     eval rustc $flags $binflags src/main.rs || exit 1
+else
+    eval clippy-driver $flags $binflags src/main.rs || exit 1
 fi
