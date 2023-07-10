@@ -352,7 +352,7 @@ impl<'a> Tile<'a>
                 let w0 = f32x4::splat(vert0.proj[3]) * hbary0;
                 let w1 = f32x4::splat(vert1.proj[3]) * hbary1;
                 let w2 = f32x4::splat(vert2.proj[3]) * hbary2;
-                let wp = w0 + w1 + w2;
+                let wp = (w0 + w1 + w2).recip();
                 let bary0 = w0 * wp;
                 let bary1 = w1 * wp;
                 let bary2 = w2 * wp;
