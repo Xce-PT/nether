@@ -341,9 +341,9 @@ impl Region
                 let saved = (base as *mut Fragment).read(); // Save this as it will be overwritten by the deallocator.
                 self.deallocate(NonNull::new_unchecked(base as *mut u8), old_layout);
                 let new_base = self.allocate(new_layout).unwrap().as_mut_ptr().cast::<u8>();
-                (new_base as *mut u8).copy_from(base as _, old_layout.size());
+                new_base.copy_from(base as _, old_layout.size());
                 (new_base as *mut Fragment).write(saved);
-                let slice = slice_from_raw_parts(new_base as *mut u8, new_layout.size());
+                let slice = slice_from_raw_parts(new_base, new_layout.size());
                 let slice = NonNull::from(slice);
                 return Ok(slice);
             }
@@ -351,9 +351,9 @@ impl Region
         // At this point the only option is to allocate a new block, copy everything
         // over, and deallocate the current one.
         let new_base = self.allocate(new_layout)?.as_mut_ptr().cast::<u8>();
-        (new_base as *mut u8).copy_from_nonoverlapping(base as _, old_layout.size());
+        new_base.copy_from_nonoverlapping(base as _, old_layout.size());
         self.deallocate(NonNull::new_unchecked(base as *mut u8), old_layout);
-        let slice = slice_from_raw_parts(new_base as *mut u8, new_layout.size());
+        let slice = slice_from_raw_parts(new_base, new_layout.size());
         let slice = NonNull::from(slice);
         Ok(slice)
     }
@@ -411,9 +411,9 @@ impl Region
                 let saved = (base as *mut Fragment).read(); // Save this as it will be overwritten by the deallocator.
                 self.deallocate(NonNull::new_unchecked(base as *mut u8), old_layout);
                 let new_base = self.allocate(new_layout).unwrap().as_mut_ptr().cast::<u8>();
-                (new_base as *mut u8).copy_from(base as _, new_layout.size());
+                new_base.copy_from(base as _, new_layout.size());
                 (new_base as *mut Fragment).write(saved);
-                let slice = slice_from_raw_parts(new_base as *mut u8, new_layout.size());
+                let slice = slice_from_raw_parts(new_base, new_layout.size());
                 let slice = NonNull::from(slice);
                 return Ok(slice);
             }
@@ -421,9 +421,9 @@ impl Region
         // At this point the only option is to allocate a new block, copy everything
         // over, and deallocate the current one.
         let new_base = self.allocate(new_layout)?.as_mut_ptr().cast::<u8>();
-        (new_base as *mut u8).copy_from_nonoverlapping(base as _, new_layout.size());
+        new_base.copy_from_nonoverlapping(base as _, new_layout.size());
         self.deallocate(NonNull::new_unchecked(base as *mut u8), old_layout);
-        let slice = slice_from_raw_parts(new_base as *mut u8, new_layout.size());
+        let slice = slice_from_raw_parts(new_base, new_layout.size());
         let slice = NonNull::from(slice);
         Ok(slice)
     }

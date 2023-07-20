@@ -7,6 +7,9 @@ mod quat;
 mod trans;
 mod vec;
 
+#[cfg(not(test))]
+use core::arch::asm;
+
 pub use angle::*;
 pub use mat::*;
 pub use proj::*;
