@@ -24,15 +24,17 @@ mod geom;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
+use core::simd::f32x4;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 pub use self::fb::{FrameBuffer, Vertex as ProjectedVertex};
 pub use self::geom::*;
 use crate::cpu::COUNT as CPU_COUNT;
-use crate::math::{Angle, Projection, Transform, Vector};
+use crate::math::{Angle, Projection, Transform};
 use crate::pixvalve::PIXVALVE;
 use crate::sched::SCHED;
+use crate::simd::SimdFloatExtra;
 use crate::sync::{Lazy, Lock, RwLock};
 use crate::{mbox, PERRY_RANGE};
 
@@ -87,9 +89,9 @@ pub struct Video
 pub struct Vertex
 {
     /// Position.
-    pos: Vector,
+    pos: f32x4,
     /// RGBA Color.
-    color: Vector,
+    color: f32x4,
 }
 
 /// Vertical sync future.
@@ -214,12 +216,12 @@ impl Video
         let mdl = mdl.into_matrix();
         let mdlviewproj = mdl * view * proj;
         let map = |vert: &Vertex| {
-            let mut proj = vert.pos * mdlviewproj;
+            let mut proj = vert.pos.mul_mat(mdlviewproj);
             let recip = proj[3].recip();
-            proj *= recip;
+            proj = proj.mul_scalar(recip);
             proj[3] = recip;
-            ProjectedVertex { proj: proj.into_simd(),
-                              color: vert.color.into_simd() }
+            ProjectedVertex { proj,
+                              color: vert.color }
         };
         let filter = |verts: &[ProjectedVertex; 3]| {
             let vert1 = verts[1].proj - verts[0].proj;
@@ -261,8 +263,8 @@ impl Video
     /// Draws tiles to the frame buffer.
     async fn draw(&self)
     {
+        let cmds = self.cmds.rlock();
         for mut tile in self.fb.tiles() {
-            let cmds = self.cmds.rlock();
             for cmd in cmds.iter() {
                 for proj in cmd.proj.iter() {
                     tile.draw_triangle(proj[0], proj[1], proj[2]);

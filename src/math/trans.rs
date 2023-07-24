@@ -9,7 +9,7 @@ use super::*;
 pub struct Transform
 {
     /// Position.
-    pos: Vector,
+    pos: f32x4,
     /// Rotation.
     rot: Quaternion,
     /// Scale.
@@ -25,7 +25,7 @@ impl Transform
     /// * `scale`: Scale.
     ///
     /// Returns the newly created transformation.
-    pub fn from_components(pos: Vector, rot: Quaternion, scale: f32) -> Self
+    pub fn from_components(pos: f32x4, rot: Quaternion, scale: f32) -> Self
     {
         Self { pos, rot, scale }
     }
@@ -37,26 +37,26 @@ impl Transform
     {
         let rot = self.rot.recip();
         let scale = self.scale.recip();
-        let pos = -self.pos * rot * scale;
+        let pos = -(self.pos * rot).mul_scalar(scale);
         Self { pos, rot, scale }
     }
 
     /// Converts this transformation into a matrix with the same properties.
     ///
     /// Returns a newly created matrix with the results.
-    pub fn into_matrix(self) -> Matrix
+    pub fn into_matrix(self) -> f32x4x4
     {
         let rot = self.rot.into_matrix();
-        let vec0 = Vector::from([self.scale, 0.0, 0.0, 0.0]);
-        let vec1 = Vector::from([0.0, self.scale, 0.0, 0.0]);
-        let vec2 = Vector::from([0.0, 0.0, self.scale, 0.0]);
-        let vec3 = Vector::from([0.0, 0.0, 0.0, 1.0]);
-        let scale = Matrix::from([vec0, vec1, vec2, vec3]);
-        let vec0 = Vector::from([1.0, 0.0, 0.0, 0.0]);
-        let vec1 = Vector::from([0.0, 1.0, 0.0, 0.0]);
-        let vec2 = Vector::from([0.0, 0.0, 1.0, 0.0]);
-        let vec3 = Vector::from([self.pos[0], self.pos[1], self.pos[2], 1.0]);
-        let pos = Matrix::from([vec0, vec1, vec2, vec3]);
+        let vec0 = f32x4::from_array([self.scale, 0.0, 0.0, 0.0]);
+        let vec1 = f32x4::from_array([0.0, self.scale, 0.0, 0.0]);
+        let vec2 = f32x4::from_array([0.0, 0.0, self.scale, 0.0]);
+        let vec3 = f32x4::from_array([0.0, 0.0, 0.0, 1.0]);
+        let scale = f32x4x4::from_row_array([vec0, vec1, vec2, vec3]);
+        let vec0 = f32x4::from_array([1.0, 0.0, 0.0, 0.0]);
+        let vec1 = f32x4::from_array([0.0, 1.0, 0.0, 0.0]);
+        let vec2 = f32x4::from_array([0.0, 0.0, 1.0, 0.0]);
+        let vec3 = f32x4::from_array([self.pos[0], self.pos[1], self.pos[2], 1.0]);
+        let pos = f32x4x4::from_row_array([vec0, vec1, vec2, vec3]);
         rot * scale * pos
     }
 }
@@ -65,7 +65,7 @@ impl Default for Transform
 {
     fn default() -> Self
     {
-        Self { pos: Vector::from([0.0, 0.0, 0.0, 1.0]),
+        Self { pos: f32x4::from_array([0.0, 0.0, 0.0, 1.0]),
                rot: Quaternion::default(),
                scale: 1.0 }
     }
@@ -77,7 +77,7 @@ impl Mul for Transform
 
     fn mul(self, other: Self) -> Self
     {
-        let pos = self.pos * other.rot * other.scale + other.pos;
+        let pos = (self.pos * other.rot).mul_scalar(other.scale) + other.pos;
         let rot = self.rot * other.rot;
         let scale = self.scale * other.scale;
         Self { pos, rot, scale }
@@ -102,33 +102,33 @@ mod tests
     #[test]
     fn into_matrix()
     {
-        let pos = Vector::from([2.0, 3.0, 4.0, 0.0]);
-        let axis = Vector::from([1.0; 4]);
+        let pos = f32x4::from_array([2.0, 3.0, 4.0, 0.0]);
+        let axis = f32x4::from_array([1.0; 4]);
         let angle = Angle::from(PI * 2.0 / 3.0);
         let rot = Quaternion::from_axis_angle(axis, angle);
         let scale = 2.0;
         let actual = Transform::from_components(pos, rot, scale).into_matrix();
-        let vec0 = Vector::from([0.0, 2.0, 0.0, 0.0]);
-        let vec1 = Vector::from([0.0, 0.0, 2.0, 0.0]);
-        let vec2 = Vector::from([2.0, 0.0, 0.0, 0.0]);
-        let vec3 = Vector::from([2.0, 3.0, 4.0, 1.0]);
-        let expected = Matrix::from([vec0, vec1, vec2, vec3]);
+        let vec0 = f32x4::from_array([0.0, 2.0, 0.0, 0.0]);
+        let vec1 = f32x4::from_array([0.0, 0.0, 2.0, 0.0]);
+        let vec2 = f32x4::from_array([2.0, 0.0, 0.0, 0.0]);
+        let vec3 = f32x4::from_array([2.0, 3.0, 4.0, 1.0]);
+        let expected = f32x4x4::from_row_array([vec0, vec1, vec2, vec3]);
         expect_roughly_mat(actual, expected);
     }
 
     #[test]
     fn mul_recip()
     {
-        let vec = Vector::from([2.0, 3.0, 4.0, 0.0]);
-        let pos = Vector::from([3.0, 4.0, 5.0, 0.0]);
-        let axis = Vector::from([1.0; 4]);
+        let vec = f32x4::from_array([2.0, 3.0, 4.0, 0.0]);
+        let pos = f32x4::from_array([3.0, 4.0, 5.0, 0.0]);
+        let axis = f32x4::from_array([1.0; 4]);
         let angle = Angle::from(PI * 2.0 / 3.0);
         let rot = Quaternion::from_axis_angle(axis, angle);
         let scale = 2.0;
         let lhs = Transform::from_components(pos, rot, scale);
         let rhs = lhs.recip();
         let trans = lhs * rhs;
-        let actual = vec * trans.scale * trans.rot + trans.pos;
+        let actual = vec.mul_scalar(trans.scale) * trans.rot + trans.pos;
         let expected = vec;
         expect_roughly_vec(actual, expected);
     }

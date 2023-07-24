@@ -24,7 +24,10 @@ mod mbox;
 #[cfg(not(test))]
 mod pixvalve;
 #[cfg(not(test))]
+mod prim;
+#[cfg(not(test))]
 mod sched;
+mod simd;
 #[cfg(not(test))]
 mod sync;
 #[cfg(not(test))]
@@ -43,10 +46,11 @@ use core::f32::consts::FRAC_PI_2;
 #[cfg(not(test))]
 use core::fmt::Write;
 #[cfg(not(test))]
-#[cfg(not(test))]
 use core::ops::Range;
 #[cfg(not(test))]
 use core::panic::PanicInfo;
+#[cfg(not(test))]
+use core::simd::f32x4;
 #[cfg(not(test))]
 use core::write;
 
@@ -55,9 +59,11 @@ use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
 use self::irq::IRQ;
 #[cfg(not(test))]
-use self::math::{Angle, Quaternion, Transform, Vector};
+use self::math::{Angle, Quaternion, Transform};
 #[cfg(not(test))]
 use self::sched::SCHED;
+#[cfg(not(test))]
+use self::simd::SimdFloatExtra;
 #[cfg(not(test))]
 use self::timer::TIMER;
 #[cfg(not(test))]
@@ -134,21 +140,21 @@ async fn ticker() -> !
     let fov = Angle::from(FRAC_PI_2);
     let cam = Transform::default();
     let square = Square::new();
-    let pos = Vector::from([0.0, 0.0, -4.0, 1.0]);
+    let pos = f32x4::from_array([0.0, 0.0, -4.0, 1.0]);
     let rot = Quaternion::default();
     let scale = 3.0;
     let sqmdl = Transform::from_components(pos, rot, scale);
     let tri = Triangle::new();
-    let pos = Vector::from([0.0, 0.0, -2.0, 1.0]);
+    let pos = f32x4::from_array([0.0, 0.0, -2.0, 1.0]);
     let mut rot = Quaternion::default();
     let scale = 1.0;
     let mut recog = Recognizer::new();
     loop {
         recog.sample();
-        let vec0 = Vector::from([0.0, 0.0, 1.0, 0.0]);
+        let vec0 = f32x4::from_array([0.0, 0.0, 1.0, 0.0]);
         let vec1 = recog.translated();
         let axis = vec0.cross_dot(vec0 + vec1);
-        let angle = Angle::from(vec1.length());
+        let angle = Angle::from(vec1.len());
         rot *= Quaternion::from_axis_angle(axis, angle);
         rot *= recog.rotated();
         let mdl = Transform::from_components(pos, rot, scale);

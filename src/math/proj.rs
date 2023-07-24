@@ -19,7 +19,7 @@ const NEAR: f32 = 1.0 / 16.0;
 pub struct Projection
 {
     /// Raw matrix.
-    mat: Matrix,
+    mat: f32x4x4,
 }
 
 impl Projection
@@ -39,16 +39,16 @@ impl Projection
         let scale = angle.tan().recip() * if width >= height { halfheight } else { halfwidth };
         let xoff = -halfwidth;
         let yoff = -halfheight;
-        let vec0 = Vector::from([scale, 0.0, 0.0, 0.0]);
-        let vec1 = Vector::from([0.0, scale, 0.0, 0.0]);
-        let vec2 = Vector::from([xoff, yoff, 0.0, -1.0]);
-        let vec3 = Vector::from([0.0, 0.0, NEAR, 0.0]);
-        let mat = Matrix::from([vec0, vec1, vec2, vec3]);
+        let vec0 = f32x4::from_array([scale, 0.0, 0.0, 0.0]);
+        let vec1 = f32x4::from_array([0.0, scale, 0.0, 0.0]);
+        let vec2 = f32x4::from_array([xoff, yoff, 0.0, -1.0]);
+        let vec3 = f32x4::from_array([0.0, 0.0, NEAR, 0.0]);
+        let mat = f32x4x4::from_row_array([vec0, vec1, vec2, vec3]);
         Self { mat }
     }
 
     /// Returns the matrix for this projection.
-    pub fn into_matrix(self) -> Matrix
+    pub fn into_matrix(self) -> f32x4x4
     {
         self.mat
     }
@@ -70,18 +70,18 @@ mod tests
         let proj = Projection::new_perspective(width, height, fov);
         let rhs = proj.into_matrix();
         let tanpisix = (PI / 6.0).tan();
-        let lhs = Vector::from([0.0, 0.0, -1.0, 1.0]);
-        let actual = lhs * rhs;
-        let expected = Vector::from([160.0, 120.0, NEAR, 1.0]);
+        let lhs = f32x4::from_array([0.0, 0.0, -1.0, 1.0]);
+        let actual = lhs.mul_mat(rhs);
+        let expected = f32x4::from_array([160.0, 120.0, NEAR, 1.0]);
         expect_roughly_vec(actual, expected);
-        let lhs = Vector::from([tanpisix, tanpisix, -1.0, 1.0]);
-        let actual = lhs * rhs;
-        let expected = Vector::from([280.0, 240.0, NEAR, 1.0]);
+        let lhs = f32x4::from_array([tanpisix, tanpisix, -1.0, 1.0]);
+        let actual = lhs.mul_mat(rhs);
+        let expected = f32x4::from_array([280.0, 240.0, NEAR, 1.0]);
         expect_roughly_vec(actual, expected);
-        let lhs = Vector::from([tanpisix, tanpisix, -2.0, 1.0]);
-        let actual = lhs * rhs;
-        let actual = actual / actual[3];
-        let expected = Vector::from([220.0, 180.0, NEAR / 2.0, 1.0]);
+        let lhs = f32x4::from_array([tanpisix, tanpisix, -2.0, 1.0]);
+        let actual = lhs.mul_mat(rhs);
+        let actual = actual.mul_scalar(actual[3].recip());
+        let expected = f32x4::from_array([220.0, 180.0, NEAR / 2.0, 1.0]);
         expect_roughly_vec(actual, expected);
     }
 }

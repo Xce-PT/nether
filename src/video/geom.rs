@@ -5,7 +5,7 @@
 use core::f32::consts::FRAC_PI_3;
 
 use super::*;
-use crate::math::{Angle, Vector};
+use crate::math::Angle;
 
 /// Linearly interpolated color triangle.
 #[derive(Debug)]
@@ -30,15 +30,15 @@ impl Triangle
     pub fn new() -> Self
     {
         let tan = Angle::from(FRAC_PI_3).tan();
-        let vert0 = Vector::from([-1.0, -tan / 3.0, 0.0, 1.0]);
-        let vert1 = Vector::from([1.0, -tan / 3.0, 0.0, 1.0]);
-        let vert2 = Vector::from([0.0, tan / 3.0 * 2.0, 0.0, 1.0]);
+        let vert0 = f32x4::from_array([-1.0, -tan / 3.0, 0.0, 1.0]);
+        let vert1 = f32x4::from_array([1.0, -tan / 3.0, 0.0, 1.0]);
+        let vert2 = f32x4::from_array([0.0, tan / 3.0 * 2.0, 0.0, 1.0]);
         let vert0 = Vertex { pos: vert0,
-                             color: Vector::from([1.0, 0.0, 0.0, 1.0]) };
+                             color: f32x4::from_array([1.0, 0.0, 0.0, 1.0]) };
         let vert1 = Vertex { pos: vert1,
-                             color: Vector::from([0.0, 0.0, 1.0, 1.0]) };
+                             color: f32x4::from_array([0.0, 0.0, 1.0, 1.0]) };
         let vert2 = Vertex { pos: vert2,
-                             color: Vector::from([0.0, 1.0, 0.0, 1.0]) };
+                             color: f32x4::from_array([0.0, 1.0, 0.0, 1.0]) };
         let geom = [vert0, vert1, vert2, vert2, vert1, vert0];
         Self { geom }
     }
@@ -57,11 +57,11 @@ impl Square
     /// Returns the newly created square.
     pub fn new() -> Self
     {
-        let vert0 = Vector::from([-1.0, -1.0, 0.0, 1.0]);
-        let vert1 = Vector::from([1.0, -1.0, 0.0, 1.0]);
-        let vert2 = Vector::from([-1.0, 1.0, 0.0, 1.0]);
-        let vert3 = Vector::from([1.0, 1.0, 0.0, 1.0]);
-        let color = Vector::from([0.5, 0.5, 0.5, 1.0]);
+        let vert0 = f32x4::from_array([-1.0, -1.0, 0.0, 1.0]);
+        let vert1 = f32x4::from_array([1.0, -1.0, 0.0, 1.0]);
+        let vert2 = f32x4::from_array([-1.0, 1.0, 0.0, 1.0]);
+        let vert3 = f32x4::from_array([1.0, 1.0, 0.0, 1.0]);
+        let color = f32x4::from_array([0.5, 0.5, 0.5, 1.0]);
         let vert0 = Vertex { pos: vert0, color };
         let vert1 = Vertex { pos: vert1, color };
         let vert2 = Vertex { pos: vert2, color };
