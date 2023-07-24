@@ -13,10 +13,11 @@ use alloc::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::iter::Iterator;
 use core::mem::size_of;
-use core::simd::{f32x4, mask32x4, u16x4, u16x8, u32x4, usizex8, SimdFloat, SimdPartialEq, SimdPartialOrd, SimdUint};
+use core::simd::{f32x4, mask32x4, u16x4, u16x8, u32x4, usizex8, SimdFloat, SimdPartialOrd, SimdUint};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
+use crate::simd::{SimdFloatExtra, SimdPartialEqExtra, SimdPartialOrdExtra};
 use crate::to_dma;
 
 /// Maximum width or height of a tile.
@@ -292,7 +293,7 @@ impl<'a> Tile<'a>
             // The triangle is completely outside this tile.
             return;
         }
-        let itotal = (area0 + area1 + area2).recip();
+        let itotal = (area0 + area1 + area2).fast_recip();
         let bary0 = area0 * itotal;
         let bary1 = area1 * itotal;
         let bary2 = area2 * itotal;
@@ -307,7 +308,6 @@ impl<'a> Tile<'a>
         let vinc2 = (bary2[2] - bary2[0]) * sizeyi;
         // Try to reduce the number of tests to the smallest possible axis-aligned
         // bounding box.
-        let zero = f32x4::splat(0.0);
         let twidth = self.fb.twidth;
         let (tcol, trow, tcolmax, trowmax) =
             if bary0.reduce_min() >= 0.0 && bary1.reduce_min() >= 0.0 && bary2.reduce_min() >= 0.0 {
@@ -323,19 +323,19 @@ impl<'a> Tile<'a>
                 let trowmax = (max[1] as usize - row + 2) & !0x1;
                 (tcol, trow, tcolmax, trowmax)
             } else {
-                // The tile and the triangle overlap partially.
+                // The tile and the triangle may overlap partially.
                 let col = self.col;
                 let row = self.row;
-                let intc = bary0.simd_ge(zero) & bary1.simd_ge(zero) & bary2.simd_ge(zero);
+                let intc = bary0.simd_gez() & bary1.simd_gez() & bary2.simd_gez();
                 let bary0 = f32x4::from_array([bary0[0], bary0[0], bary0[2], bary0[1]]);
                 let bary1 = f32x4::from_array([bary1[0], bary1[0], bary1[2], bary1[1]]);
                 let bary2 = f32x4::from_array([bary2[0], bary2[0], bary2[2], bary2[1]]);
                 let inc0 = f32x4::from_array([hinc0, vinc0, hinc0, vinc0]);
                 let inc1 = f32x4::from_array([hinc1, vinc1, hinc1, vinc1]);
                 let inc2 = f32x4::from_array([hinc2, vinc2, hinc2, vinc2]);
-                let offset0 = bary0 / -inc0;
-                let offset1 = bary1 / -inc1;
-                let offset2 = bary2 / -inc2;
+                let offset0 = bary0 * -inc0.fast_recip();
+                let offset1 = bary1 * -inc1.fast_recip();
+                let offset2 = bary2 * -inc2.fast_recip();
                 let ptl = f32x4::from_array([ptx[0], pty[0], ptx[2], pty[1]]);
                 let ptr = f32x4::from_array([ptx[0], pty[0], ptx[1], pty[2]]);
                 let int0 = ptl + offset0;
@@ -445,6 +445,7 @@ impl<'a> Tile<'a>
         let vinc2 = f32x4::splat(vinc2 + vinc2);
         // Declare some useful values that will hopefully will be kept in registers by
         // the optimizer.
+        let zero = f32x4::splat(0.0);
         let one = f32x4::splat(1.0);
         let dxm = u32x4::splat(0x3F800000);
         let dxb = u32x4::splat(0x30000000);
@@ -466,12 +467,12 @@ impl<'a> Tile<'a>
             let mut hbary2 = vbary2;
             for tcol in (tcol .. tcolmax).step_by(2) {
                 // Validate only the fragments inside the triangle.
-                let mut valid = hbary0.simd_gt(zero) & hbary1.simd_gt(zero) & hbary2.simd_gt(zero);
+                let mut valid = hbary0.simd_gtz() & hbary1.simd_gtz() & hbary2.simd_gtz();
                 // Include half of the edges.
-                if (hbary0.simd_eq(zero) | hbary1.simd_eq(zero) | hbary2.simd_eq(zero)).any() {
-                    valid |= hbary0.simd_eq(zero) & (hinc0.simd_lt(zero) | hinc0.simd_eq(zero) & vinc0.simd_lt(zero));
-                    valid |= hbary1.simd_eq(zero) & (hinc1.simd_lt(zero) | hinc1.simd_eq(zero) & vinc1.simd_lt(zero));
-                    valid |= hbary2.simd_eq(zero) & (hinc2.simd_lt(zero) | hinc2.simd_eq(zero) & vinc2.simd_lt(zero));
+                if (hbary0.simd_eqz() | hbary1.simd_eqz() | hbary2.simd_eqz()).any() {
+                    valid |= hbary0.simd_eqz() & (hinc0.simd_ltz() | hinc0.simd_eqz() & vinc0.simd_ltz());
+                    valid |= hbary1.simd_eqz() & (hinc1.simd_ltz() | hinc1.simd_eqz() & vinc1.simd_ltz());
+                    valid |= hbary2.simd_eqz() & (hinc2.simd_ltz() | hinc2.simd_eqz() & vinc2.simd_ltz());
                 }
                 if !valid.any() {
                     // All fragments were invalidated.
@@ -482,10 +483,10 @@ impl<'a> Tile<'a>
                 }
                 let (bary0, bary1, bary2) = if project {
                     // Compute the perspective-correct barycentric coordinates.
-                    let w0 = f32x4::splat(vert0.proj[3]) * hbary0;
-                    let w1 = f32x4::splat(vert1.proj[3]) * hbary1;
-                    let w2 = f32x4::splat(vert2.proj[3]) * hbary2;
-                    let itotal = (w0 + w1 + w2).recip();
+                    let w0 = bary0.mul_lane::<3>(vert0.proj);
+                    let w1 = bary1.mul_lane::<3>(vert1.proj);
+                    let w2 = bary2.mul_lane::<3>(vert2.proj);
+                    let itotal = (w0 + w1 + w2).fast_recip();
                     let bary0 = w0 * itotal;
                     let bary1 = w1 * itotal;
                     let bary2 = w2 * itotal;
@@ -500,10 +501,9 @@ impl<'a> Tile<'a>
                 // values in the depth buffer and the near clipping plane.
                 let db = unsafe { self.db.0.as_mut_ptr().add(offset).cast::<u16x4>() };
                 let odepth = unsafe { db.read() };
-                let z0 = f32x4::splat(vert0.proj[2]) * bary0;
-                let z1 = f32x4::splat(vert1.proj[2]) * bary1;
-                let z2 = f32x4::splat(vert2.proj[2]) * bary2;
-                let z = z0 + z1 + z2;
+                let z = bary0.mul_lane::<2>(vert0.proj);
+                let z = z.fused_mul_add_lane::<2>(bary1, vert1.proj);
+                let z = z.fused_mul_add_lane::<2>(bary2, vert2.proj);
                 valid &= z.simd_le(one);
                 let zb = z.to_bits().saturating_sub(dxb);
                 let zx = (zb & dxm) >> ds;
@@ -524,20 +524,17 @@ impl<'a> Tile<'a>
                 // Apply shading.
                 let cb = unsafe { self.cb.0.as_mut_ptr().add(offset).cast::<u16x4>() };
                 let ocolor = unsafe { cb.read() };
-                let red0 = f32x4::splat(vert0.color[0]) * bary0;
-                let red1 = f32x4::splat(vert1.color[0]) * bary1;
-                let red2 = f32x4::splat(vert2.color[0]) * bary2;
-                let red = red0 + red1 + red2;
+                let red = bary0.mul_lane::<0>(vert0.proj);
+                let red = red.fused_mul_add_lane::<0>(bary1, vert1.proj);
+                let red = red.fused_mul_add_lane::<0>(bary2, vert2.proj);
                 let red = red.simd_max(zero).simd_min(one);
-                let green0 = f32x4::splat(vert0.color[1]) * bary0;
-                let green1 = f32x4::splat(vert1.color[1]) * bary1;
-                let green2 = f32x4::splat(vert2.color[1]) * bary2;
-                let green = green0 + green1 + green2;
+                let green = bary0.mul_lane::<1>(vert0.proj);
+                let green = green.fused_mul_add_lane::<1>(bary1, vert1.proj);
+                let green = green.fused_mul_add_lane::<1>(bary2, vert2.proj);
                 let green = green.simd_max(zero).simd_min(one);
-                let blue0 = f32x4::splat(vert0.color[2]) * bary0;
-                let blue1 = f32x4::splat(vert1.color[2]) * bary1;
-                let blue2 = f32x4::splat(vert2.color[2]) * bary2;
-                let blue = blue0 + blue1 + blue2;
+                let blue = bary0.mul_lane::<2>(vert0.proj);
+                let blue = blue.fused_mul_add_lane::<2>(bary1, vert1.proj);
+                let blue = blue.fused_mul_add_lane::<2>(bary2, vert2.proj);
                 let blue = blue.simd_max(zero).simd_min(one);
                 // Compute the RGB565 color values.
                 let red = (red * rbmul).cast::<u32>() << rshift;

@@ -7,11 +7,13 @@ extern crate alloc;
 use alloc::boxed::Box;
 use core::cmp::min;
 use core::mem::MaybeUninit;
+use core::simd::f32x4;
 use core::sync::atomic::{fence, Ordering};
 
 use crate::alloc::{Alloc, UNCACHED_REGION};
-use crate::math::{Angle, Quaternion, Vector};
+use crate::math::{Angle, Quaternion};
 use crate::pixvalve::PIXVALVE;
+use crate::simd::*;
 use crate::sync::{Lazy, Lock, RwLock};
 use crate::{mbox, to_dma};
 
@@ -39,7 +41,7 @@ pub struct Touch
     /// Touchscreen buffer.
     state: Lock<Box<State, Alloc<'static, 0x10>>>,
     /// Saved touch points for comparison.
-    saved: RwLock<Option<(Vector, Vector)>>,
+    saved: RwLock<Option<(f32x4, f32x4)>>,
 }
 
 /// Input changes since the last poll.
@@ -47,9 +49,9 @@ pub struct Touch
 pub struct Recognizer
 {
     /// Last saved sample.
-    saved: Option<(Vector, Vector)>,
+    saved: Option<(f32x4, f32x4)>,
     /// Amount moved since the last poll.
-    pub trans: Vector,
+    pub trans: f32x4,
     /// Amount rotated since the last poll.
     pub rot: Quaternion,
 }
@@ -132,7 +134,7 @@ impl Touch
             let y = y * 2 - HEIGHT;
             let x = x as f32 / min(WIDTH, HEIGHT) as f32;
             let y = y as f32 / min(WIDTH, HEIGHT) as f32;
-            Vector::from([x, y, 0.0, 0.0])
+            f32x4::from_array([x, y, 0.0, 0.0])
         };
         let new = state.points.map(mapper);
         let new = (new[0], new[1]);
@@ -148,12 +150,12 @@ impl Recognizer
     pub fn new() -> Self
     {
         Self { saved: None,
-               trans: Vector::from([0.0, 0.0, 0.0, 0.0]),
+               trans: f32x4::from_array([0.0, 0.0, 0.0, 0.0]),
                rot: Quaternion::default() }
     }
 
     /// Returns the amount translated since the last sample.
-    pub fn translated(&self) -> Vector
+    pub fn translated(&self) -> f32x4
     {
         self.trans
     }
@@ -171,7 +173,7 @@ impl Recognizer
             saved
         } else {
             self.saved = None;
-            self.trans = Vector::from([0.0, 0.0, 0.0, 0.0]);
+            self.trans = f32x4::splat(0.0);
             self.rot = Quaternion::default();
             return;
         };
@@ -179,8 +181,8 @@ impl Recognizer
         self.saved = Some(new);
         // Make sure that the points are in the same order as in the last poll by
         // verifying which are closest to which.
-        let sqdist0 = (old.0 - new.0).sq_length();
-        let sqdist1 = (old.0 - new.1).sq_length();
+        let sqdist0 = (old.0 - new.0).sq_len();
+        let sqdist1 = (old.0 - new.1).sq_len();
         let new = if sqdist0 <= sqdist1 {
             (new.0, new.1)
         } else {
@@ -195,19 +197,15 @@ impl Recognizer
         // Compute the rotation by calculating the angle between the vectors created by
         // the difference between the two contacts in each sample.
         let old = old.1 - old.0;
-        let len = old.length();
-        if len == 0.0 {
+        let Some(old) = old.normalize() else {
             self.rot = Quaternion::default();
             return;
-        }
-        let old = old / len;
+        };
         let new = new.1 - new.0;
-        let len = new.length();
-        if len == 0.0 {
+        let Some(new) = new.normalize() else {
             self.rot = Quaternion::default();
             return;
-        }
-        let new = new / len;
+        };
         let axis = old.cross_dot(new);
         let cos = axis[3];
         let angle = Angle::from_cos(cos);
