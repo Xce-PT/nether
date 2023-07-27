@@ -9,7 +9,8 @@
 #![feature(strict_provenance)]
 #![feature(slice_ptr_get)]
 #![feature(portable_simd)]
-#![feature(iter_array_chunks)]
+
+extern crate alloc as rust_alloc;
 
 mod alloc;
 #[cfg(not(test))]
@@ -55,6 +56,11 @@ use core::simd::f32x4;
 use core::write;
 
 #[cfg(not(test))]
+use rust_alloc::sync::Arc;
+#[cfg(not(test))]
+use rust_alloc::vec;
+
+#[cfg(not(test))]
 use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
 use self::irq::IRQ;
@@ -71,7 +77,7 @@ use self::touch::Recognizer;
 #[cfg(not(test))]
 use self::uart::UART;
 #[cfg(not(test))]
-use self::video::{Square, Triangle, VIDEO};
+use self::video::{Cube, Light, VIDEO};
 
 /// uncached RANGE.
 #[cfg(not(test))]
@@ -139,15 +145,11 @@ async fn ticker() -> !
 {
     let fov = Angle::from(FRAC_PI_2);
     let cam = Transform::default();
-    let square = Square::new();
-    let pos = f32x4::from_array([0.0, 0.0, -4.0, 1.0]);
-    let rot = Quaternion::default();
-    let scale = 3.0;
-    let sqmdl = Transform::from_components(pos, rot, scale);
-    let tri = Triangle::new();
-    let pos = f32x4::from_array([0.0, 0.0, -2.0, 1.0]);
+    let cube = Cube::new();
+    let pos = f32x4::from_array([0.0, 0.0, -3.0, 1.0]);
     let mut rot = Quaternion::default();
     let scale = 1.0;
+    let lights = Arc::new(vec![Light::new_omni(f32x4::splat(0.0), f32x4::splat(1.0), 10.0)]);
     let mut recog = Recognizer::new();
     loop {
         recog.sample();
@@ -158,8 +160,7 @@ async fn ticker() -> !
         rot *= Quaternion::from_axis_angle(axis, angle);
         rot *= recog.rotated();
         let mdl = Transform::from_components(pos, rot, scale);
-        VIDEO.draw_triangles(tri.geom(), mdl, cam, fov);
-        VIDEO.draw_triangles(square.geom(), sqmdl, cam, fov);
+        VIDEO.draw_triangles(cube.geom(), lights.clone(), mdl, cam, fov);
         VIDEO.commit().await;
     }
 }

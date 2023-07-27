@@ -20,7 +20,9 @@ extern crate alloc;
 
 mod fb;
 mod geom;
+mod shader;
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
@@ -28,8 +30,9 @@ use core::simd::f32x4;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
-pub use self::fb::{FrameBuffer, Vertex as ProjectedVertex};
+pub use self::fb::FrameBuffer;
 pub use self::geom::*;
+pub use self::shader::{Light, Triangle as ProjectedTriangle, Vertex as ProjectedVertex};
 use crate::cpu::COUNT as CPU_COUNT;
 use crate::math::{Angle, Projection, Transform};
 use crate::pixvalve::PIXVALVE;
@@ -84,13 +87,19 @@ pub struct Video
     cmds: RwLock<Vec<Command>>,
 }
 
+/// Visual triangle.
+#[derive(Debug)]
+pub struct Triangle(Vertex, Vertex, Vertex);
+
 /// Visual vertex.
 #[derive(Clone, Copy, Debug)]
 pub struct Vertex
 {
     /// Position.
     pos: f32x4,
-    /// RGBA Color.
+    /// Normal.
+    normal: f32x4,
+    /// Color.
     color: f32x4,
 }
 
@@ -106,8 +115,10 @@ struct VerticalSync
 #[derive(Debug)]
 struct Command
 {
-    /// Projected vertices.
-    proj: Vec<[ProjectedVertex; 3]>,
+    /// Projected triangles.
+    tris: Vec<ProjectedTriangle>,
+    /// Lights potentially illuminating these triangles.
+    lights: Arc<Vec<Light>>,
 }
 
 /// Set plane property.
@@ -205,36 +216,54 @@ impl Video
 
     /// Adds a draw command to the queue.
     ///
-    /// * `verts`: Triangle vertices to draw.
+    /// * `tris`: Triangles to draw.
+    /// * `lights`: Lights potentially illuminating the object.
     /// * `cam`: Camera to world transformation.
     /// * `proj`: Projection transformation.
-    pub fn draw_triangles(&self, verts: &[Vertex], mdl: Transform, cam: Transform, fov: Angle)
+    pub fn draw_triangles(&self, tris: &[Triangle], lights: Arc<Vec<Light>>, mdl: Transform, cam: Transform, fov: Angle)
     {
         let proj = Projection::new_perspective(SCREEN_WIDTH, SCREEN_HEIGHT, fov);
         let proj = proj.into_matrix();
         let view = cam.recip().into_matrix();
+        let nrot = mdl.rotation().into_matrix();
         let mdl = mdl.into_matrix();
         let mdlviewproj = mdl * view * proj;
-        let map = |vert: &Vertex| {
-            let mut proj = vert.pos.mul_mat(mdlviewproj);
-            let recip = proj[3].recip();
-            proj = proj.mul_scalar(recip);
-            proj[3] = recip;
-            ProjectedVertex { proj,
-                              color: vert.color }
+        let map = |tri: &Triangle| {
+            let mut proj0 = tri.0.pos.mul_mat(mdlviewproj);
+            let mut proj1 = tri.1.pos.mul_mat(mdlviewproj);
+            let mut proj2 = tri.2.pos.mul_mat(mdlviewproj);
+            let recip = f32x4::from_array([proj0[3], proj1[3], proj2[3], f32::NAN]).fast_recip();
+            proj0[3] = 1.0;
+            proj1[3] = 1.0;
+            proj2[3] = 1.0;
+            proj0 = proj0.mul_lane::<0>(recip);
+            proj1 = proj1.mul_lane::<1>(recip);
+            proj2 = proj2.mul_lane::<2>(recip);
+            let normal0 = tri.0.normal.mul_mat(nrot);
+            let normal1 = tri.1.normal.mul_mat(nrot);
+            let normal2 = tri.2.normal.mul_mat(nrot);
+            let proj0 = ProjectedVertex { pos: tri.0.pos,
+                                          proj: proj0,
+                                          normal: normal0,
+                                          color: tri.0.color };
+            let proj1 = ProjectedVertex { pos: tri.1.pos,
+                                          proj: proj1,
+                                          normal: normal1,
+                                          color: tri.1.color };
+            let proj2 = ProjectedVertex { pos: tri.2.pos,
+                                          proj: proj2,
+                                          normal: normal2,
+                                          color: tri.2.color };
+            ProjectedTriangle(proj0, proj1, proj2)
         };
-        let filter = |verts: &[ProjectedVertex; 3]| {
-            let vert1 = verts[1].proj - verts[0].proj;
-            let vert2 = verts[2].proj - verts[0].proj;
+        let filter = |tri: &ProjectedTriangle| {
+            let vert1 = tri.1.proj - tri.0.proj;
+            let vert2 = tri.2.proj - tri.0.proj;
             let area = vert1[0] * vert2[1] - vert1[1] * vert2[0];
             area > 0.0
         };
-        let proj = verts.iter()
-                        .map(map)
-                        .array_chunks::<3>()
-                        .filter(filter)
-                        .collect::<Vec<_>>();
-        let cmd = Command { proj };
+        let tris = tris.iter().map(map).filter(filter).collect::<Vec<_>>();
+        let cmd = Command { tris, lights };
         self.cmds.wlock().push(cmd);
     }
 
@@ -266,8 +295,8 @@ impl Video
         let cmds = self.cmds.rlock();
         for mut tile in self.fb.tiles() {
             for cmd in cmds.iter() {
-                for proj in cmd.proj.iter() {
-                    tile.draw_triangle(proj[0], proj[1], proj[2]);
+                for tri in cmd.tris.iter() {
+                    tile.draw_triangle(tri, &cmd.lights);
                 }
             }
         }

@@ -41,6 +41,14 @@ impl Transform
         Self { pos, rot, scale }
     }
 
+    /// Returns the roetation component of this transformation.
+    #[cfg(not(test))]
+    #[inline]
+    pub fn rotation(self) -> Quaternion
+    {
+        self.rot
+    }
+
     /// Converts this transformation into a matrix with the same properties.
     ///
     /// Returns a newly created matrix with the results.
