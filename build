@@ -15,6 +15,10 @@ libflags="--crate-type lib --emit link,metadata --out-dir \"$depsdir\""
 binflags="-o boot/kernel8.img"
 rustsrcdir="$sysroot/lib/rustlib/src/rust/library"
 
+if test "$1" == hdmi; then
+    cfgflags=--cfg=hdmi
+fi
+
 if test ! -f "$rustsrcdir/core/src/lib.rs" -o ! -f "$rustsrcdir/alloc/src/lib.rs"; then
     echo "Component rust-src does not appear to be properly installed for nightly Rust." >&2
     exit 1
@@ -38,7 +42,7 @@ fi
 echo "Compiling $name..."
 if test -z "`which clippy-driver`" -o -z "`clippy-driver +nightly -V 2>/dev/null`"; then
     echo "Warning: Clippy for nightly Rust does not appear to be properly installed." >&2
-    eval rustc $flags $binflags src/main.rs || exit 1
+    eval rustc $flags $binflags $cfgflags src/main.rs || exit 1
 else
-    eval clippy-driver $flags $binflags src/main.rs || exit 1
+    eval clippy-driver $flags $binflags $cfgflags src/main.rs || exit 1
 fi
