@@ -3,7 +3,7 @@
 //! Expects triangles with X and Y in screen coordinates with a reverse Z
 //! where the near clipping plane is at 1 and the far clipping plane is at 0,
 //! and draws them to cached tiles of up to 32x32 pixels. Color pixels are
-//! stored in the 16 bit native endian integer RGB565 format, whereas depth
+//! stored in the 32 bit native endian integer XRGB8888 format, whereas depth
 //! pixels are stored in a custom 16-bit native endian floating point format
 //! with just a 5-bit exponent and 11-bit mantissa.
 
@@ -13,7 +13,7 @@ use alloc::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::iter::Iterator;
 use core::mem::size_of;
-use core::simd::{f32x4, mask32x4, u16x4, u16x8, u32x4, usizex8, SimdFloat, SimdPartialEq, SimdPartialOrd, SimdUint};
+use core::simd::{f32x4, mask32x4, u16x4, u32x4, u32x8, usizex8, SimdFloat, SimdPartialEq, SimdPartialOrd, SimdUint};
 use core::slice::from_raw_parts as slice_from_raw_parts;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,9 +32,9 @@ static UNCACHED: Alloc<0x40> = Alloc::with_region(&UNCACHED_REGION);
 pub struct FrameBuffer
 {
     /// First frame buffer.
-    fb0: *mut u16,
+    fb0: *mut u32,
     /// Second frame buffer.
-    fb1: *mut u16,
+    fb1: *mut u32,
     /// Image width.
     width: usize,
     /// Image height.
@@ -78,7 +78,7 @@ pub struct Tile<'a>
     // Axis aligned bounding box maximum values.
     max: f32x4,
     /// Tile's color buffer.
-    cb: [u16x4; TILE_DIM_MAX * TILE_DIM_MAX / 4],
+    cb: [u32x4; TILE_DIM_MAX * TILE_DIM_MAX / 4],
     /// Tile's depth buffer.
     db: [u16x4; TILE_DIM_MAX * TILE_DIM_MAX / 4],
 }
@@ -108,9 +108,9 @@ impl FrameBuffer
             }
         }
         assert!(twidth > 0 && theight > 0, "Invalid width or height");
-        let layout = Layout::from_size_align(width * height * size_of::<u16>(), 64).unwrap();
-        let fb0 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16>() };
-        let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u16>() };
+        let layout = Layout::from_size_align(width * height * size_of::<u32>(), 64).unwrap();
+        let fb0 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u32>() };
+        let fb1 = unsafe { UNCACHED.alloc_zeroed(layout).cast::<u32>() };
         assert!(!fb0.is_null() && !fb1.is_null(),
                 "Failed to allocate memory for the frame buffers");
         Self { fb0,
@@ -222,7 +222,7 @@ impl<'a> Tile<'a>
         let pty = f32x4::from_array([origy, origy, origy + sizey, origy + sizey]);
         let min = f32x4::from_array([origx, origy, 0.0, 0.0]);
         let max = f32x4::from_array([origx + sizex, origy + sizey, 1.0, f32::INFINITY]);
-        let cb = [u16x4::splat(0); TILE_DIM_MAX * TILE_DIM_MAX / 4];
+        let cb = [u32x4::splat(0); TILE_DIM_MAX * TILE_DIM_MAX / 4];
         let db = [u16x4::splat(0); TILE_DIM_MAX * TILE_DIM_MAX / 4];
         Self { fb,
                col,
@@ -437,10 +437,9 @@ impl<'a> Tile<'a>
         let dxb = u32x4::splat(0x30000000);
         let dmm = u32x4::splat(0x7FF000);
         let ds = u32x4::splat(12);
-        let rbmul = f32x4::splat(31.5);
-        let gmul = f32x4::splat(63.5);
-        let rshift = u32x4::splat(11);
-        let gshift = u32x4::splat(5);
+        let rgbmul = 255.5f32;
+        let rshift = u32x4::splat(16);
+        let gshift = u32x4::splat(8);
         let is_affine = tri.0.proj[3] == tri.1.proj[3] && tri.0.proj[3] == tri.2.proj[3];
         let is_plane = tri.0.normal.simd_eq(tri.1.normal).all() && tri.0.normal.simd_eq(tri.2.normal).all();
         // Loop over all the fragments in the tile in groups of 2x2, and shade those
@@ -489,15 +488,14 @@ impl<'a> Tile<'a>
                 let offset = (trow >> 1) * (twidth >> 1) + (tcol >> 1);
                 // Compute the depth and exclude all fragments outside the range between the
                 // values in the depth buffer and the near clipping plane.
-                let odepth = self.db[offset];
+                let odepth = self.db[offset].cast::<u32>();
                 let mut shader = Shader::new(tri, ctx);
                 let depth = shader.depth();
-                valid &= depth.simd_le(one);
+                valid &= depth.simd_le(one) & depth.simd_gez();
                 let depthb = depth.to_bits().saturating_sub(dxb);
                 let depthx = (depthb & dxm) >> ds;
                 let depthm = (depthb & dmm) >> ds;
-                let depth = (depthx | depthm).cast::<u16>();
-                let mut valid = valid.cast::<i16>();
+                let depth = depthx | depthm;
                 valid &= depth.simd_gt(odepth);
                 if !valid.any() {
                     // All the remaining fragments were invalidated by the depth test.
@@ -506,19 +504,19 @@ impl<'a> Tile<'a>
                     hbary2 += hinc2;
                     continue;
                 }
-                self.db[offset] = valid.select(depth, odepth);
+                self.db[offset] = valid.select(depth, odepth).cast::<u16>();
                 // Apply shading.
                 lights.iter().for_each(|l| shader.illuminate(l));
                 let (red, green, blue) = shader.finish();
-                // Compute the RGB565 color values.
+                // Compute the RGB888 color values.
                 let ocolor = self.cb[offset];
                 let red = red.simd_max(zero).simd_min(one);
                 let green = green.simd_max(zero).simd_min(one);
                 let blue = blue.simd_max(zero).simd_min(one);
-                let red = (red * rbmul).cast::<u32>() << rshift;
-                let green = (green * gmul).cast::<u32>() << gshift;
-                let blue = (blue * rbmul).cast::<u32>();
-                let color = (red | green | blue).cast::<u16>();
+                let red = red.mul_scalar(rgbmul).cast::<u32>() << rshift;
+                let green = green.mul_scalar(rgbmul).cast::<u32>() << gshift;
+                let blue = blue.mul_scalar(rgbmul).cast::<u32>();
+                let color = red | green | blue;
                 self.cb[offset] = valid.select(color, ocolor);
                 // Apply horizontal increments.
                 hbary0 += hinc0;
@@ -545,19 +543,19 @@ impl<'a> Drop for Tile<'a>
         let buf = unsafe { buf.add(self.row * self.fb.width + self.col) };
         let eindices = usizex8::from_array([0, 1, 4, 5, 8, 9, 12, 13]);
         let oindices = usizex8::from_array([2, 3, 6, 7, 10, 11, 14, 15]);
-        let black = u16x8::splat(0);
+        let black = u32x8::splat(0);
         let twidth = self.fb.twidth;
         let theight = self.fb.theight;
         let width = self.fb.width;
         for trow in 0 .. theight {
             let indices = if trow & 0x1 == 0 { eindices } else { oindices };
             let buf = unsafe { buf.add(trow * width) };
-            let cb = unsafe { slice_from_raw_parts(self.cb.as_ptr().cast::<u16>(), TILE_DIM_MAX * TILE_DIM_MAX) };
+            let cb = unsafe { slice_from_raw_parts(self.cb.as_ptr().cast::<u32>(), TILE_DIM_MAX * TILE_DIM_MAX) };
             for tcol in (0 .. twidth).step_by(8) {
                 let offset = usizex8::splat((trow >> 1) * (twidth << 1) + (tcol << 1));
                 let indices = indices + offset;
-                let color = u16x8::gather_or(cb, indices, black);
-                unsafe { buf.add(tcol).cast::<u16x8>().write(color) };
+                let color = u32x8::gather_or(cb, indices, black);
+                unsafe { buf.add(tcol).cast::<u32x8>().write(color) };
             }
         }
         self.fb.tfinished.fetch_add(1, Ordering::Relaxed);

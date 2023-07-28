@@ -52,7 +52,7 @@ const SCREEN_HEIGHT: usize = 480;
 #[cfg(hdmi)]
 const SCREEN_HEIGHT: usize = 1080;
 /// Pixel depth in bytes.
-const DEPTH: usize = 2;
+const DEPTH: usize = 4;
 /// Horizontal pitch in bytes.
 const PITCH: usize = SCREEN_WIDTH * DEPTH;
 /// Vertical pitch in rows.
@@ -70,8 +70,8 @@ const HVS_DISPLIST_BUF: *mut u32 = (HVS_BASE + 0x4000) as _;
 const DISP_ID: u8 = 0;
 #[cfg(hdmi)]
 const DISP_ID: u8 = 2;
-/// Plane image type RGB565 setting.
-const IMG_RGB565_TYPE: u8 = 1;
+/// Plane image type XRGB8888 setting.
+const IMG_XRGB8888_TYPE: u8 = 44;
 /// Image transformation (bit0 = 180 degree rotation, bit 16 = X flip, bit 17 =
 /// Y flip).
 const IMG_TRANSFORM: u32 = 0x20000;
@@ -193,7 +193,7 @@ impl Video
         let cfb = fb.vsync();
         let plane_in = SetPlaneProperty { display_id: DISP_ID,
                                           plane_id: 0,
-                                          img_type: IMG_RGB565_TYPE,
+                                          img_type: IMG_XRGB8888_TYPE,
                                           layer: 0,
                                           width: SCREEN_WIDTH as _,
                                           height: SCREEN_HEIGHT as _,
