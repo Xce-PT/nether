@@ -42,9 +42,15 @@ use crate::sync::{Lazy, Lock, RwLock};
 use crate::{mbox, PERRY_RANGE};
 
 /// Screen width in pixels.
+#[cfg(not(hdmi))]
 const SCREEN_WIDTH: usize = 800;
+#[cfg(hdmi)]
+const SCREEN_WIDTH: usize = 1920;
 /// Screen height in pixels.
+#[cfg(not(hdmi))]
 const SCREEN_HEIGHT: usize = 480;
+#[cfg(hdmi)]
+const SCREEN_HEIGHT: usize = 1080;
 /// Pixel depth in bytes.
 const DEPTH: usize = 2;
 /// Horizontal pitch in bytes.
@@ -55,12 +61,15 @@ const VPITCH: usize = 1;
 const SET_PLANE_TAG: u32 = 0x48015;
 /// Hardware video scaler base address.
 const HVS_BASE: usize = PERRY_RANGE.start + 0x2400000;
-/// Hardware video scaler display list register 0.
-const HVS_DISPLIST0: *const u32 = (HVS_BASE + 0x20) as _;
+/// Hardware video scaler display list register.
+const HVS_DISPLIST: *const u32 = (HVS_BASE + 0x20) as _;
 /// Hardware video scaler display list buffer.
 const HVS_DISPLIST_BUF: *mut u32 = (HVS_BASE + 0x4000) as _;
-/// Main LCD display ID.
-const LCD_DISP_ID: u8 = 0;
+/// Display ID.
+#[cfg(not(hdmi))]
+const DISP_ID: u8 = 0;
+#[cfg(hdmi)]
+const DISP_ID: u8 = 2;
 /// Plane image type RGB565 setting.
 const IMG_RGB565_TYPE: u8 = 1;
 /// Image transformation (bit0 = 180 degree rotation, bit 16 = X flip, bit 17 =
@@ -182,7 +191,7 @@ impl Video
     {
         let fb = FrameBuffer::new(SCREEN_WIDTH, SCREEN_HEIGHT);
         let cfb = fb.vsync();
-        let plane_in = SetPlaneProperty { display_id: LCD_DISP_ID,
+        let plane_in = SetPlaneProperty { display_id: DISP_ID,
                                           plane_id: 0,
                                           img_type: IMG_RGB565_TYPE,
                                           layer: 0,
@@ -318,7 +327,7 @@ impl Video
             // buffer.  This should only loop a lot when the firmware configuration changes,
             // after that it should find the index to update very quickly.
             let idx = 'outer: loop {
-                let mut idx = unsafe { HVS_DISPLIST0.read_volatile() as usize };
+                let mut idx = unsafe { HVS_DISPLIST.read_volatile() as usize };
                 'inner: loop {
                     let ctrl = unsafe { HVS_DISPLIST_BUF.add(idx).read_volatile() };
                     // Look for a plane with unity scaling.
