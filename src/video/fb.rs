@@ -476,9 +476,9 @@ impl<'a> Tile<'a>
                               is_plane }
                 } else {
                     // Compute the perspective-correct barycentric coordinates.
-                    let w0 = bary0.mul_lane::<3>(tri.0.proj);
-                    let w1 = bary1.mul_lane::<3>(tri.1.proj);
-                    let w2 = bary2.mul_lane::<3>(tri.2.proj);
+                    let w0 = hbary0.mul_lane::<3>(tri.0.proj);
+                    let w1 = hbary1.mul_lane::<3>(tri.1.proj);
+                    let w2 = hbary2.mul_lane::<3>(tri.2.proj);
                     let itotal = (w0 + w1 + w2).fast_recip();
                     Context { bary0: w0 * itotal,
                               bary1: w1 * itotal,
