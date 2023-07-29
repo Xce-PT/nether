@@ -36,7 +36,7 @@ pub use self::shader::{Light, Triangle as ProjectedTriangle, Vertex as Projected
 use crate::cpu::COUNT as CPU_COUNT;
 use crate::math::{Angle, Projection, Transform};
 use crate::pixvalve::PIXVALVE;
-use crate::sched::SCHED;
+use crate::sched::{Scheduler, SCHED};
 use crate::simd::SimdFloatExtra;
 use crate::sync::{Lazy, Lock, RwLock};
 use crate::{mbox, PERRY_RANGE};
@@ -301,13 +301,16 @@ impl Video
     /// Draws tiles to the frame buffer.
     async fn draw(&self)
     {
-        let cmds = self.cmds.rlock();
         for mut tile in self.fb.tiles() {
-            for cmd in cmds.iter() {
-                for tri in cmd.tris.iter() {
-                    tile.draw_triangle(tri, &cmd.lights);
+            {
+                let cmds = self.cmds.rlock();
+                for cmd in cmds.iter() {
+                    for tri in cmd.tris.iter() {
+                        tile.draw_triangle(tri, &cmd.lights);
+                    }
                 }
             }
+            Scheduler::relent().await;
         }
     }
 

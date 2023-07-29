@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use alloc::task::Wake;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use self::chan::{channel, Receiver, Sender};
@@ -27,9 +27,9 @@ pub static SCHED: Lazy<Scheduler> = Lazy::new(Scheduler::new);
 pub struct Scheduler
 {
     /// Tasks scheduled for polling.
-    scheduled: Lock<VecDeque<Arc<Lock<dyn Task>>>>,
+    scheduled: Lock<VecDeque<Arc<dyn Task>>>,
     /// All running tasks.
-    running: Lock<BTreeMap<u64, Arc<Lock<dyn Task>>>>,
+    running: Lock<BTreeMap<u64, Arc<dyn Task>>>,
     /// Spawned task counter.
     count: AtomicU64,
 }
@@ -42,6 +42,14 @@ pub struct JoinHandle<T: Copy + Send>
     rx: Receiver<T>,
 }
 
+/// Future that returns pending on the first poll and ready on subsequent polls.
+#[derive(Debug)]
+pub struct Relent
+{
+    /// Whether this future has been polled.
+    is_ready: bool,
+}
+
 /// Task state.
 #[derive(Debug)]
 struct State<T: Copy + Send, F: Future<Output = T> + Send + 'static>
@@ -49,11 +57,11 @@ struct State<T: Copy + Send, F: Future<Output = T> + Send + 'static>
     /// Task identifier.
     id: u64,
     /// Whether the task is active.
-    is_active: bool,
+    is_active: AtomicBool,
     /// Future polled by this task.
-    fut: Pin<Box<F>>,
+    fut: Lock<Pin<Box<F>>>,
     /// Join handler notification channel sender end.
-    tx: Option<Sender<T>>,
+    tx: Lock<Option<Sender<T>>>,
 }
 
 /// Task waker.
@@ -65,18 +73,18 @@ struct Alarm
 }
 
 /// Type-erased task state.
-trait Task: Send
+trait Task: Send + Sync
 {
     /// Returns the task's unique identifier.
     fn id(&self) -> u64;
 
     /// Sets the task to active and returns its previous status.
-    fn activate(&mut self) -> bool;
+    fn activate(&self) -> bool;
 
     /// Resumes executing the task, notifying its join handler on completion.
     ///
     /// Returns whether the task has finished.
-    fn resume(&mut self) -> bool;
+    fn resume(&self) -> bool;
 }
 
 impl Scheduler
@@ -103,7 +111,7 @@ impl Scheduler
         let id = self.count.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = channel::<T>();
         let state = State::new(id, fut, tx);
-        let state = Arc::new(Lock::new(state));
+        let state = Arc::new(state);
         self.running.lock().insert(id, state.clone());
         let mut scheduled = self.scheduled.lock();
         scheduled.push_back(state);
@@ -117,6 +125,13 @@ impl Scheduler
         JoinHandle::new(rx)
     }
 
+    /// Returns a future that, when awaited on, yields execution to the other
+    /// tasks in the active queue once.
+    pub fn relent() -> Relent
+    {
+        Relent::new()
+    }
+
     /// Schedules a task to be polled.
     ///
     /// * `id`: Task identifier.
@@ -127,7 +142,7 @@ impl Scheduler
                        .get(&id)
                        .expect("Attempted to wake  up a non-existing task")
                        .clone();
-        if !task.lock().activate() {
+        if !task.activate() {
             let mut scheduled = self.scheduled.lock();
             scheduled.push_back(task);
             let count = scheduled.len();
@@ -148,7 +163,6 @@ impl Scheduler
         let count = scheduled.len();
         drop(scheduled);
         if let Some(task) = task {
-            let mut task = task.lock();
             let finished = task.resume();
             if finished {
                 SCHED.running.lock().remove(&task.id());
@@ -185,6 +199,32 @@ impl<T: Copy + Send> Future for JoinHandle<T>
     }
 }
 
+impl Relent
+{
+    /// Creates and initializes a new relent future.
+    ///
+    /// Returns the newly created future.
+    pub fn new() -> Self
+    {
+        Self { is_ready: false }
+    }
+}
+
+impl Future for Relent
+{
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<()>
+    {
+        if self.is_ready {
+            return Poll::Ready(());
+        }
+        self.as_mut().is_ready = true;
+        ctx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
 impl<T: Copy + Send, F: Future<Output = T> + Send + 'static> State<T, F>
 {
     /// Creates and initializes a new task state.
@@ -197,9 +237,9 @@ impl<T: Copy + Send, F: Future<Output = T> + Send + 'static> State<T, F>
     fn new(id: u64, fut: F, tx: Sender<T>) -> Self
     {
         Self { id,
-               is_active: true,
-               fut: Box::pin(fut),
-               tx: Some(tx) }
+               is_active: AtomicBool::new(true),
+               fut: Lock::new(Box::pin(fut)),
+               tx: Lock::new(Some(tx)) }
     }
 }
 
@@ -210,21 +250,20 @@ impl<T: Copy + Send, F: Future<Output = T> + Send + 'static> Task for State<T, F
         self.id
     }
 
-    fn activate(&mut self) -> bool
+    fn activate(&self) -> bool
     {
-        let is_active = self.is_active;
-        self.is_active = true;
-        is_active
+        self.is_active.swap(true, Ordering::SeqCst)
     }
 
-    fn resume(&mut self) -> bool
+    fn resume(&self) -> bool
     {
         let alarm = Arc::new(Alarm::new(self.id));
         let waker = Waker::from(alarm);
         let mut ctx = Context::from_waker(&waker);
-        self.is_active = false;
-        if let Poll::Ready(val) = self.fut.as_mut().poll(&mut ctx) {
+        self.is_active.swap(false, Ordering::SeqCst);
+        if let Poll::Ready(val) = self.fut.lock().as_mut().poll(&mut ctx) {
             self.tx
+                .lock()
                 .take()
                 .expect("Missing channel sender end to notify the join handle of a finished task")
                 .send(val);
