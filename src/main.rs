@@ -151,14 +151,16 @@ async fn ticker() -> !
     let scale = 1.0;
     let lights = Arc::new(vec![Light::new_omni(f32x4::splat(0.0), f32x4::splat(1.0), 10.0)]);
     let mut recog = Recognizer::new();
+    let norm = Recognizer::WIDTH.min(Recognizer::HEIGHT).recip();
+    let norm = f32x4::from_array([norm, norm, 0.0, 0.0]);
     loop {
         recog.sample();
         let vec0 = f32x4::from_array([0.0, 0.0, 1.0, 0.0]);
-        let vec1 = recog.translated();
+        let vec1 = recog.translation_delta() * norm;
         let axis = vec0.cross_dot(vec0 + vec1);
         let angle = Angle::from(vec1.len());
         rot *= Quaternion::from_axis_angle(axis, angle);
-        rot *= recog.rotated();
+        rot *= recog.rotation_delta();
         let mdl = Transform::from_components(pos, rot, scale);
         VIDEO.draw_triangles(cube.geom(), lights.clone(), mdl, cam, fov);
         VIDEO.commit().await;
