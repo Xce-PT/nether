@@ -9,10 +9,13 @@
 #![feature(strict_provenance)]
 #![feature(slice_ptr_get)]
 #![feature(portable_simd)]
+#![feature(iter_array_chunks)]
 
 extern crate alloc as rust_alloc;
 
 mod alloc;
+#[cfg(not(test))]
+mod audio;
 #[cfg(not(test))]
 mod clock;
 #[cfg(not(test))]
@@ -60,6 +63,8 @@ use rust_alloc::sync::Arc;
 #[cfg(not(test))]
 use rust_alloc::vec;
 
+#[cfg(not(test))]
+use self::audio::AUDIO;
 #[cfg(not(test))]
 use self::cpu::{id as cpu_id, COUNT as CPU_COUNT, LOAD as CPU_LOAD};
 #[cfg(not(test))]
@@ -134,14 +139,15 @@ pub extern "C" fn start() -> !
         };
         CPU_LOAD.reset();
         TIMER.schedule(10000, load);
-        SCHED.spawn(ticker());
+        SCHED.spawn(audio_ticker());
+        SCHED.spawn(video_ticker());
     }
     IRQ.dispatch()
 }
 
-/// Actions to perform in an infinite loop.
+/// Main loop for the video task.
 #[cfg(not(test))]
-async fn ticker() -> !
+async fn video_ticker() -> !
 {
     let fov = Angle::from(FRAC_PI_2);
     let cam = Transform::default();
@@ -164,6 +170,31 @@ async fn ticker() -> !
         let mdl = Transform::from_components(pos, rot, scale);
         VIDEO.draw_triangles(cube.geom(), lights.clone(), mdl, cam, fov);
         VIDEO.commit().await;
+    }
+}
+
+/// Main loop for the audio task.
+#[cfg(not(test))]
+async fn audio_ticker()
+{
+    let mut recog = Recognizer::new();
+    loop {
+        recog.sample();
+        let tick = {
+            let mut audio = AUDIO.lock();
+            if let Some(pos) = recog.first_position() {
+                let freq = 200.0 + pos[1];
+                let pan = pos[0] / Recognizer::WIDTH * 2.0 - 1.0;
+                audio.play_tone(freq as u16, pan);
+            }
+            if let Some(pos) = recog.second_position() {
+                let freq = 200.0 + pos[1];
+                let pan = pos[0] / Recognizer::WIDTH * 2.0 - 1.0;
+                audio.play_tone(freq as u16, pan);
+            }
+            audio.commit()
+        };
+        tick.await;
     }
 }
 

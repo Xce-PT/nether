@@ -53,6 +53,10 @@ pub struct Recognizer
     pub trans: f32x4,
     /// Amount rotated since the last poll.
     pub rot: Quaternion,
+    /// First finger's position.
+    pos0: Option<f32x4>,
+    /// Second finger's position.
+    pos1: Option<f32x4>,
 }
 
 /// Touchscreen state information from the video core.
@@ -152,7 +156,9 @@ impl Recognizer
     {
         Self { saved: [None, None],
                trans: f32x4::from_array([0.0; 4]),
-               rot: Quaternion::default() }
+               rot: Quaternion::default(),
+               pos0: None,
+               pos1: None }
     }
 
     /// Returns the amount translated since the last sample.
@@ -167,12 +173,26 @@ impl Recognizer
         self.rot
     }
 
+    /// Returns the position of the first touch point.
+    pub fn first_position(&self) -> Option<f32x4>
+    {
+        self.pos0
+    }
+
+    /// Returns the position of the second touch point.
+    pub fn second_position(&self) -> Option<f32x4>
+    {
+        self.pos1
+    }
+
     /// Samples the touch sensor and computes the deltas since the last sample.
     pub fn sample(&mut self)
     {
         let new = *TOUCH.saved.rlock();
         let old = self.saved;
         self.saved = new;
+        self.pos0 = new[0];
+        self.pos1 = new[1];
         match (old[0], old[1], new[0], new[1]) {
             (Some(old0), Some(old1), Some(new0), Some(new1)) => self.compute_rotation(old0, old1, new0, new1),
             (Some(old), None, Some(new), None) => self.compute_translation(old, new),
