@@ -5,6 +5,7 @@
 #![no_std]
 #![feature(compiler_builtins)]
 #![feature(c_size_t)]
+#![allow(internal_features)]
 
 use core::arch::asm;
 use core::ffi::{c_float, c_int, c_size_t, c_void};

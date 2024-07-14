@@ -13,7 +13,7 @@ use alloc::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::iter::Iterator;
 use core::mem::size_of;
-use core::simd::{f32x4, mask32x4, u16x4, u32x4, u32x8, usizex8, SimdFloat, SimdPartialEq, SimdPartialOrd, SimdUint};
+use core::simd::prelude::*;
 use core::slice::from_raw_parts as slice_from_raw_parts;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -328,11 +328,11 @@ impl<'a> Tile<'a>
                 let int1 = ptl + offset1;
                 let int2 = ptl + offset2;
                 let (x0, y0) = int0.deinterleave(ptr);
-                let y0 = y0.rotate_lanes_right::<2>();
+                let y0 = y0.rotate_elements_right::<2>();
                 let (x1, y1) = int1.deinterleave(ptr);
-                let y1 = y1.rotate_lanes_right::<2>();
+                let y1 = y1.rotate_elements_right::<2>();
                 let (x2, y2) = int2.deinterleave(ptr);
-                let y2 = y2.rotate_lanes_right::<2>();
+                let y2 = y2.rotate_elements_right::<2>();
                 let tminx = f32x4::splat(tmin[0]);
                 let tminy = f32x4::splat(tmin[1]);
                 let tmaxx = f32x4::splat(tmax[0]);

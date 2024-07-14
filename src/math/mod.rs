@@ -8,8 +8,10 @@ mod trans;
 use core::simd::f32x4;
 
 pub use angle::*;
+#[cfg(not(test))]
 pub use proj::*;
 pub use quat::*;
+#[cfg(not(test))]
 pub use trans::*;
 
 #[cfg(not(test))]

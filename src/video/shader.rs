@@ -1,6 +1,6 @@
 //! Fragment shader.
 
-use core::simd::{f32x4, SimdFloat};
+use core::simd::prelude::*;
 
 use crate::simd::SimdFloatExtra;
 

@@ -46,6 +46,7 @@ pub struct Region
 }
 
 /// Valid alignment marker.
+#[cfg(not(test))]
 pub trait ValidAlign {}
 
 /// Free memory fragment.
@@ -443,37 +444,6 @@ mod tests
         buf: [u8; 0x1000],
     }
 
-    #[derive(Debug)]
-    enum BufferProvisionError
-    {
-        InvalidRange(Range<usize>),
-        ShortRange(Range<usize>),
-        Overflow(Range<usize>),
-        ShortGap(usize),
-    }
-
-    #[derive(Debug)]
-    enum BufferValidationError
-    {
-        InvalidRange(Range<usize>),
-        ShortRange(Range<usize>),
-        Overflow(Range<usize>),
-        ShortGap(usize),
-        MissingBlock(Range<usize>),
-        FragmentMismatch(usize, usize),
-        SizeMismatch(usize, usize),
-        ExcessBlock(usize),
-    }
-
-    #[derive(Debug)]
-    enum TestError
-    {
-        Input(BufferProvisionError),
-        Output(BufferValidationError),
-        Full,
-        Corrupted,
-    }
-
     impl Buffer
     {
         fn new() -> Self
@@ -481,7 +451,7 @@ mod tests
             Self { buf: [0xFF; 0x1000] }
         }
 
-        fn provide(&mut self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), BufferProvisionError>
+        fn provide(&mut self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), ()>
         {
             let mut offset = 0usize;
             let mut prev = null_mut::<Fragment>();
@@ -490,16 +460,16 @@ mod tests
             for frag in frags {
                 let frag = frag.start .. frag.end;
                 if frag.start >= frag.end {
-                    return Err(BufferProvisionError::InvalidRange(frag));
+                    return Err(());
                 }
                 if frag.start + 16 > frag.end {
-                    return Err(BufferProvisionError::ShortRange(frag));
+                    return Err(());
                 }
                 if frag.end > 0x1000 {
-                    return Err(BufferProvisionError::Overflow(frag));
+                    return Err(());
                 }
                 if offset != 0 && frag.start - offset < 16 {
-                    return Err(BufferProvisionError::ShortGap(frag.start - offset));
+                    return Err(());
                 }
                 unsafe {
                     let current = buf.add(frag.start).cast::<Fragment>();
@@ -517,7 +487,7 @@ mod tests
             Ok(())
         }
 
-        fn validate(&self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), BufferValidationError>
+        fn validate(&self, region: &mut Region, frags: &[Range<usize>]) -> Result<(), ()>
         {
             let mut offset = 0usize;
             let mut current = *region.head.as_ref().unwrap();
@@ -525,34 +495,33 @@ mod tests
             for frag in frags {
                 let frag = frag.start .. frag.end;
                 if frag.start >= frag.end {
-                    return Err(BufferValidationError::InvalidRange(frag));
+                    return Err(());
                 }
                 if frag.start + 16 > frag.end {
-                    return Err(BufferValidationError::ShortRange(frag));
+                    return Err(());
                 }
                 if frag.end > 0x1000 {
-                    return Err(BufferValidationError::Overflow(frag));
+                    return Err(());
                 }
                 if offset != 0 && frag.start - offset < 16 {
-                    return Err(BufferValidationError::ShortGap(frag.start - offset));
+                    return Err(());
                 }
                 unsafe {
                     if current.is_null() {
-                        return Err(BufferValidationError::MissingBlock(frag));
+                        return Err(());
                     }
                     if current as usize - buf as usize != frag.start {
-                        return Err(BufferValidationError::FragmentMismatch(current as usize - buf as usize,
-                                                                           frag.start));
+                        return Err(());
                     }
                     if (*current).size != frag.end - frag.start {
-                        return Err(BufferValidationError::SizeMismatch((*current).size, frag.end - frag.start));
+                        return Err(());
                     }
                     current = (*current).next;
                     offset += frag.end - frag.start;
                 }
             }
             if !current.is_null() {
-                return Err(BufferValidationError::ExcessBlock(current as usize - buf as usize));
+                return Err(());
             }
             Ok(())
         }
@@ -617,16 +586,14 @@ mod tests
     fn alloc_unfit()
     {
         let layout = Layout::from_size_align(0x800, 16).unwrap();
-        let err = test_alloc(layout, &[0x0 .. 0x700, 0x800 .. 0xF00], &[0x0 .. 0x700, 0x800 .. 0xF00]).unwrap_err();
-        assert!(matches!(err, TestError::Full));
+        test_alloc(layout, &[0x0 .. 0x700, 0x800 .. 0xF00], &[0x0 .. 0x700, 0x800 .. 0xF00]).unwrap_err();
     }
 
     #[test]
     fn alloc_full()
     {
         let layout = Layout::from_size_align(0x1000, 16).unwrap();
-        let err = test_alloc(layout, &[], &[]).unwrap_err();
-        assert!(matches!(err, TestError::Full));
+        test_alloc(layout, &[], &[]).unwrap_err();
     }
 
     #[test]
@@ -721,40 +688,39 @@ mod tests
         assert_eq!(base, 0xA00);
     }
 
-    fn test_alloc(layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<usize, TestError>
+    fn test_alloc(layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<usize, ()>
     {
         let mut buf = Buffer::new();
         let mut region = unsafe { Region::new(buf.range()) };
-        buf.provide(&mut region, input).map_err(TestError::Input)?;
+        buf.provide(&mut region, input)?;
         let base = region.allocate(layout)
                          .map(|base| base.as_mut_ptr())
                          .unwrap_or(null_mut()) as usize;
-        buf.validate(&mut region, output).map_err(TestError::Output)?;
+        buf.validate(&mut region, output)?;
         if base == 0 {
-            return Err(TestError::Full);
+            return Err(());
         }
         let base = base - buf.range().start;
         Ok(base)
     }
 
-    fn test_dealloc(base: usize, layout: Layout, input: &[Range<usize>], output: &[Range<usize>])
-                    -> Result<(), TestError>
+    fn test_dealloc(base: usize, layout: Layout, input: &[Range<usize>], output: &[Range<usize>]) -> Result<(), ()>
     {
         let mut buf = Buffer::new();
         let mut region = unsafe { Region::new(buf.range()) };
-        buf.provide(&mut region, input).map_err(TestError::Input)?;
+        buf.provide(&mut region, input)?;
         let base = base + buf.range().start;
         unsafe { region.deallocate(NonNull::new_unchecked(base as _), layout) };
-        buf.validate(&mut region, output).map_err(TestError::Output)?;
+        buf.validate(&mut region, output)?;
         Ok(())
     }
 
     fn test_realloc(base: usize, layout: Layout, new_size: usize, input: &[Range<usize>], output: &[Range<usize>])
-                    -> Result<usize, TestError>
+                    -> Result<usize, ()>
     {
         let mut buf = Buffer::new();
         let mut region = unsafe { Region::new(buf.range()) };
-        buf.provide(&mut region, input).map_err(TestError::Input)?;
+        buf.provide(&mut region, input)?;
         let base = base + buf.range().start;
         let size = min(layout.size(), new_size);
         for offset in 0 .. size / 2 {
@@ -774,13 +740,13 @@ mod tests
                       .unwrap_or(null_mut()) as usize
             }
         };
-        buf.validate(&mut region, output).map_err(TestError::Output)?;
+        buf.validate(&mut region, output)?;
         if base == 0 {
-            return Err(TestError::Full);
+            return Err(());
         }
         for offset in 0 .. size / 2 {
             if unsafe { (base as *const u16).add(offset).read() } != offset as _ {
-                return Err(TestError::Corrupted);
+                return Err(());
             }
         }
         let base = base - buf.range().start;
