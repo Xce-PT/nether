@@ -5,7 +5,7 @@ use core::arch::aarch64::*;
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 use core::mem::transmute;
 use core::ops::{Mul, MulAssign};
-use core::simd::{f32x4, mask32x4, SimdFloat, SimdPartialEq, SimdPartialOrd};
+use core::simd::prelude::*;
 #[cfg(all(test, not(all(target_arch = "aarch64", target_feature = "neon"))))]
 use std::simd::StdFloat;
 
@@ -35,14 +35,6 @@ pub trait SimdFloatExtra: SimdFloat
     ///
     /// Returns the computed result.
     fn fast_sqrt_recip(self) -> Self;
-
-    /// Computes the linerar interpolation between two vectors.
-    ///
-    /// * `other`: Destination vector.
-    /// * `balance`: Balance between the vectors.
-    ///
-    /// Returns a vector with the result.
-    fn lerp(self, other: Self, balance: f32) -> Self;
 
     /// Computes a vector with the same direction as this vector and length 1.0.
     ///
@@ -97,15 +89,6 @@ pub trait SimdFloatExtra: SimdFloat
     /// Returns the computed result.
     fn fused_mul_add(self, left: Self, right: Self) -> Self;
 
-    /// Computes a vector resulting from multiplying a vector by a scalar and
-    /// adding the result to this vector.
-    ///
-    /// * `left`: Left side of the multiplication.
-    /// * `right`: Right side of the multiplication.
-    ///
-    /// Returns the computed result.
-    fn fused_mul_add_scalar(self, left: Self, right: f32) -> Self;
-
     /// Computes a vector resulting from multiplying a vector by a lane of
     /// another vector and adding the result to this vector.
     ///
@@ -127,25 +110,10 @@ pub trait SimdPartialEqExtra: SimdPartialEq
     ///
     /// Returns a vector with the results.
     fn simd_eqz(self) -> mask32x4;
-
-    /// Checks all lanes of self for inequality to zero.
-    ///
-    /// Returns a vector with the results.
-    fn simd_nez(self) -> mask32x4;
 }
 
 pub trait SimdPartialOrdExtra: SimdPartialOrd
 {
-    /// Checks whether all lanes of self are greater than or equal to zero.
-    ///
-    /// Returns a vector with the results.
-    fn simd_gez(self) -> mask32x4;
-
-    /// Checks whether all lanes of self are less than or equal to zero.
-    ///
-    /// Returns a vector with the results.
-    fn simd_lez(self) -> mask32x4;
-
     /// Checks whether all lanes of self are greater than zero.
     ///
     /// Returns a vector with the results.
@@ -155,6 +123,11 @@ pub trait SimdPartialOrdExtra: SimdPartialOrd
     ///
     /// Returns a vector with the results.
     fn simd_ltz(self) -> mask32x4;
+
+    /// Checks whether all lanes of self are greater than or equal to zero.
+    ///
+    /// Returns a vector with the results.
+    fn simd_gez(self) -> mask32x4;
 }
 
 impl Matrix
@@ -242,13 +215,13 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vrecpeq_f32(this);
             let step = vrecpsq_f32(res, this);
             let res = vmulq_f32(step, res);
             let step = vrecpsq_f32(res, this);
             let res = vmulq_f32(step, res);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -261,20 +234,15 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vrsqrteq_f32(this);
             let res = vrsqrtsq_f32(res, this);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
             self.sqrt().recip()
         }
-    }
-
-    fn lerp(self, other: Self, balance: f32) -> Self
-    {
-        self + (other - self).mul_scalar(balance.clamp(0.0, 1.0))
     }
 
     #[inline(always)]
@@ -304,9 +272,9 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vmulq_n_f32(this, other);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -319,10 +287,10 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
-            let that = transmute(other);
+            let this = transmute::<Self, float32x4_t>(self);
+            let that = transmute::<Self, float32x4_t>(other);
             let res = vmulq_laneq_f32(this, that, LANE);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -356,11 +324,11 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
-            let left = transmute(left);
-            let right = transmute(right);
+            let this = transmute::<Self, float32x4_t>(self);
+            let left = transmute::<Self, float32x4_t>(left);
+            let right = transmute::<Self, float32x4_t>(right);
             let res = vmlaq_f32(this, left, right);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -369,31 +337,15 @@ impl SimdFloatExtra for f32x4
     }
 
     #[inline(always)]
-    fn fused_mul_add_scalar(self, left: Self, right: f32) -> Self
-    {
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        unsafe {
-            let this = transmute(self);
-            let left = transmute(left);
-            let res = vmlaq_n_f32(this, left, right);
-            transmute(res)
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-        {
-            self + left * f32x4::splat(right)
-        }
-    }
-
-    #[inline(always)]
     fn fused_mul_add_lane<const LANE: i32>(self, left: Self, right: Self) -> Self
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
-            let left = transmute(left);
-            let right = transmute(right);
+            let this = transmute::<Self, float32x4_t>(self);
+            let left = transmute::<Self, float32x4_t>(left);
+            let right = transmute::<Self, float32x4_t>(right);
             let res = vmlaq_laneq_f32(this, left, right, LANE);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -406,9 +358,9 @@ impl SimdFloatExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vsetq_lane_f32(scalar, this, LANE);
-            transmute(res)
+            transmute::<float32x4_t, Self>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -426,9 +378,9 @@ impl SimdPartialEqExtra for f32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vceqzq_f32(this);
-            transmute(res)
+            transmute::<uint32x4_t, mask32x4>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -436,64 +388,18 @@ impl SimdPartialEqExtra for f32x4
             self.simd_eq(zero)
         }
     }
-
-    #[inline(always)]
-    fn simd_nez(self) -> mask32x4
-    {
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        unsafe {
-            let this = transmute(self);
-            let res = vceqzq_f32(this);
-            let res = vmvnq_u32(res);
-            transmute(res)
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-        {
-            let zero = f32x4::splat(0.0);
-            self.simd_ne(zero)
-        }
-    }
 }
 
 impl SimdPartialOrdExtra for f32x4
 {
-    fn simd_gez(self) -> mask32x4
-    {
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        unsafe {
-            let this = transmute(self);
-            let res = vcgezq_f32(this);
-            transmute(res)
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-        {
-            let zero = f32x4::splat(0.0);
-            self.simd_ge(zero)
-        }
-    }
-
-    fn simd_lez(self) -> mask32x4
-    {
-        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-        unsafe {
-            let this = transmute(self);
-            let res = vclezq_f32(this);
-            transmute(res)
-        }
-        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
-        {
-            let zero = f32x4::splat(0.0);
-            self.simd_le(zero)
-        }
-    }
-
+    #[inline(always)]
     fn simd_gtz(self) -> mask32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vcgtzq_f32(this);
-            transmute(res)
+            transmute::<uint32x4_t, mask32x4>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
@@ -502,18 +408,35 @@ impl SimdPartialOrdExtra for f32x4
         }
     }
 
+    #[inline(always)]
     fn simd_ltz(self) -> mask32x4
     {
         #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
         unsafe {
-            let this = transmute(self);
+            let this = transmute::<Self, float32x4_t>(self);
             let res = vcltzq_f32(this);
-            transmute(res)
+            transmute::<uint32x4_t, mask32x4>(res)
         }
         #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
         {
             let zero = f32x4::splat(0.0);
             self.simd_lt(zero)
+        }
+    }
+
+    #[inline(always)]
+    fn simd_gez(self) -> mask32x4
+    {
+        #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+        unsafe {
+            let this = transmute::<Self, float32x4_t>(self);
+            let res = vcgezq_f32(this);
+            transmute::<uint32x4_t, mask32x4>(res)
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_feature = "neon")))]
+        {
+            let zero = f32x4::splat(0.0);
+            self.simd_ge(zero)
         }
     }
 }
@@ -549,16 +472,6 @@ mod tests
                    "Actual: {}, Expected: {}",
                    f32::from_bits(actual[0]),
                    f32::from_bits(expected[0]));
-    }
-
-    #[test]
-    fn f32x4_lerp()
-    {
-        let left = f32x4::splat(1.0);
-        let right = f32x4::splat(4.0);
-        let actual = left.lerp(right, 0.25);
-        let expected = f32x4::splat(1.75);
-        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -656,17 +569,6 @@ mod tests
     }
 
     #[test]
-    fn f32x4_fused_mul_add_scalar()
-    {
-        let base = f32x4::splat(4.0);
-        let left = f32x4::splat(2.0);
-        let right = 3.0;
-        let actual = base.fused_mul_add_scalar(left, right);
-        let expected = f32x4::splat(10.0);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn f32x4_fused_mul_add_lane()
     {
         let base = f32x4::splat(4.0);
@@ -709,25 +611,9 @@ mod tests
     }
 
     #[test]
-    fn f32x4_simd_nez()
-    {
-        let actual = f32x4::from_array([1.0, 0.0, 1.0, 0.0]).simd_nez();
-        let expected = mask32x4::from_array([true, false, true, false]);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
     fn f32x4_simd_gez()
     {
         let actual = f32x4::from_array([1.0, 0.0, -1.0, 0.0]).simd_gez();
-        let expected = mask32x4::from_array([true, true, false, true]);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn f32x4_simd_lez()
-    {
-        let actual = f32x4::from_array([-1.0, 0.0, 1.0, 0.0]).simd_lez();
         let expected = mask32x4::from_array([true, true, false, true]);
         assert_eq!(actual, expected);
     }

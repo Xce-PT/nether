@@ -4,7 +4,6 @@
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
 #![feature(panic_info_message)]
-#![feature(pointer_byte_offsets)]
 #![feature(allocator_api)]
 #![feature(strict_provenance)]
 #![feature(slice_ptr_get)]

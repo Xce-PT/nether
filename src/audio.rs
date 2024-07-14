@@ -17,7 +17,7 @@ use core::alloc::Layout;
 use core::future::Future;
 use core::hint::spin_loop;
 use core::pin::Pin;
-use core::simd::{f32x4, u32x4, SimdFloat, SimdPartialOrd};
+use core::simd::prelude::*;
 use core::sync::atomic::{fence, Ordering};
 use core::task::{Context, Poll, Waker};
 

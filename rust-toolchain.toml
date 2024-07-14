@@ -1,0 +1,5 @@
+[toolchain]
+channel = "nightly-2024-07-14"
+components = ["rust-src,clippy"]
+targets = ["aarch64-unknown-none"]
+profile = "minimal"
